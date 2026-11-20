@@ -15,39 +15,41 @@ interface TechHudProps {
   onToggleOneEuro: () => void;
 }
 
-const STATE_STYLES: Record<PoseEvaluation['state'], string> = {
-  IDLE: 'bg-slate-800/90 text-slate-300 border-slate-600/60',
-  CHARGING: 'bg-amber-500/20 text-amber-300 border-amber-400/60',
-  ACTIVE: 'bg-cyan-500/25 text-cyan-200 border-cyan-400/80 shadow-[0_0_16px_rgba(56,189,248,0.45)]',
-  DISSIPATING: 'bg-indigo-500/20 text-indigo-200 border-indigo-400/60',
+const STATE_BADGE: Record<PoseEvaluation['state'], string> = {
+  IDLE: 'border-white/10 text-slate-400 bg-white/5',
+  CHARGING: 'border-[#38bdf8]/50 text-slate-200 bg-[#38bdf8]/10',
+  ACTIVE: 'border-[#38bdf8] text-[#38bdf8] bg-[#38bdf8]/15',
+  DISSIPATING: 'border-white/15 text-slate-300 bg-white/5',
 };
 
-function MetricBar({
+function HairlineMetric({
   label,
   value,
   threshold,
-  accent = 'bg-cyan-400',
 }: {
   label: string;
   value: number;
   threshold?: number;
-  accent?: string;
 }) {
   const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
+  const isActive = threshold !== undefined ? value >= threshold : value >= 0.5;
+
   return (
     <div className="space-y-1">
-      <div className="flex items-center justify-between text-[11px] font-mono">
-        <span className="text-slate-300">{label}</span>
-        <span className="text-slate-100 tabular-nums">{pct}%</span>
+      <div className="flex items-center justify-between text-[10px] font-mono">
+        <span className="text-slate-400 tracking-wider">{label}</span>
+        <span className="tabular-nums text-slate-200">{pct}%</span>
       </div>
-      <div className="relative h-1.5 w-full rounded-full bg-slate-800/90 overflow-hidden">
+      <div className="relative h-1 w-full rounded-none bg-white/5 overflow-hidden">
         <div
-          className={`h-full rounded-full transition-[width] duration-75 ${accent}`}
+          className={`h-full transition-[width] duration-75 ${
+            isActive ? 'bg-[#38bdf8]' : 'bg-slate-500'
+          }`}
           style={{ width: `${pct}%` }}
         />
         {threshold !== undefined && (
           <div
-            className="absolute top-0 bottom-0 w-0.5 bg-white/80"
+            className="absolute top-0 bottom-0 w-[1px] bg-white z-10"
             style={{ left: `${threshold * 100}%` }}
           />
         )}
@@ -60,107 +62,98 @@ export function TechHud({ telemetry, oneEuroEnabled, onToggleOneEuro }: TechHudP
   const { fps, inferenceMs, fxRenderMs, pose, engineInfo } = telemetry;
 
   return (
-    <aside className="pointer-events-auto w-76 rounded-2xl border border-cyan-500/25 bg-slate-950/80 p-4 backdrop-blur-md shadow-2xl">
-      <div className="flex items-center justify-between gap-2 border-b border-slate-800/90 pb-2.5">
+    <aside className="pointer-events-auto w-72 rounded-xl border border-white/10 bg-[#030611]/90 p-3.5 backdrop-blur-md shadow-2xl select-none">
+      {/* Header telemetry band */}
+      <div className="flex items-center justify-between gap-2 border-b border-white/5 pb-2.5">
         <div>
-          <p className="text-[10px] font-mono uppercase tracking-[0.16em] text-cyan-400">
-            CV Telemetry HUD
+          <p className="text-[9px] font-mono uppercase tracking-[0.2em] text-slate-400">
+            CINEALTA TELEMETRY
           </p>
-          <p className="text-xs text-slate-400">
-            {engineInfo ? `${engineInfo.modelName} · ${engineInfo.delegate}` : 'Initializing…'}
+          <p className="text-[11px] font-mono text-slate-300 truncate max-w-[170px]">
+            {engineInfo ? `${engineInfo.modelName} · ${engineInfo.delegate.toUpperCase()}` : 'INITIALIZING…'}
           </p>
         </div>
         <span
-          className={`rounded-full border px-2.5 py-0.5 text-[10px] font-mono font-semibold tracking-wider ${STATE_STYLES[pose.state]}`}
+          className={`rounded border px-2 py-0.5 text-[9px] font-mono font-medium tracking-widest ${STATE_BADGE[pose.state]}`}
         >
           {pose.state}
         </span>
       </div>
 
-      {/* Pipeline Performance */}
-      <div className="mt-3 grid grid-cols-4 gap-1.5 text-center font-mono">
-        <div className="rounded-lg bg-slate-900/90 px-1.5 py-1.5 border border-slate-800">
-          <div className="text-[9px] text-slate-400">FPS</div>
-          <div className="text-xs font-semibold text-cyan-300 tabular-nums">{fps}</div>
+      {/* Crisp FPS · INFER · FX · MODE stat strip */}
+      <div className="mt-2.5 grid grid-cols-4 gap-1.5 font-mono text-center">
+        <div className="rounded border border-white/5 bg-[#070b14]/80 py-1.5 px-1">
+          <div className="text-[8px] text-slate-500 tracking-widest uppercase">FPS</div>
+          <div className="text-xs font-medium text-slate-100 tabular-nums">{fps}</div>
         </div>
-        <div className="rounded-lg bg-slate-900/90 px-1.5 py-1.5 border border-slate-800">
-          <div className="text-[9px] text-slate-400">INFER</div>
-          <div className="text-xs font-semibold text-emerald-300 tabular-nums">
+        <div className="rounded border border-white/5 bg-[#070b14]/80 py-1.5 px-1">
+          <div className="text-[8px] text-slate-500 tracking-widest uppercase">INFER</div>
+          <div className="text-xs font-medium text-slate-100 tabular-nums">
             {inferenceMs.toFixed(1)}ms
           </div>
         </div>
-        <div className="rounded-lg bg-slate-900/90 px-1.5 py-1.5 border border-slate-800">
-          <div className="text-[9px] text-slate-400">FX</div>
-          <div className="text-xs font-semibold text-sky-300 tabular-nums">
+        <div className="rounded border border-white/5 bg-[#070b14]/80 py-1.5 px-1">
+          <div className="text-[8px] text-slate-500 tracking-widest uppercase">FX</div>
+          <div className="text-xs font-medium text-slate-100 tabular-nums">
             {fxRenderMs.toFixed(1)}ms
           </div>
         </div>
-        <div className="rounded-lg bg-slate-900/90 px-1.5 py-1.5 border border-slate-800">
-          <div className="text-[9px] text-slate-400">MODE</div>
-          <div className="text-[11px] font-semibold text-slate-200 leading-4">
+        <div className="rounded border border-white/5 bg-[#070b14]/80 py-1.5 px-1">
+          <div className="text-[8px] text-slate-500 tracking-widest uppercase">MODE</div>
+          <div className="text-[11px] font-medium text-slate-100">
             {pose.resolvedMode === 'full-body' ? 'FULL' : 'DESK'}
           </div>
         </div>
       </div>
 
-      {/* Pose Heuristics Breakdown */}
-      <div className="mt-3.5 space-y-2.5">
-        <MetricBar
-          label="Combined Score (≥62%)"
+      {/* Combined stance score hairline bar with sharp 62% threshold tick */}
+      <div className="mt-3 pt-2 border-t border-white/5">
+        <HairlineMetric
+          label="STANCE LOCK GATE (62%)"
           value={pose.rawConfidence}
           threshold={0.62}
-          accent={pose.rawConfidence >= 0.62 ? 'bg-cyan-300' : 'bg-sky-500'}
-        />
-        <div className="h-px bg-slate-800/80" />
-        <MetricBar
-          label={pose.resolvedMode === 'full-body' ? 'Wide Horse Stance' : 'Elbow Spread'}
-          value={pose.subScores.stanceWidth}
-          accent="bg-sky-400"
-        />
-        <MetricBar
-          label={pose.resolvedMode === 'full-body' ? 'Low Crouch Depth' : 'Stance Asymmetry'}
-          value={pose.subScores.squatDepth}
-          accent="bg-sky-400"
-        />
-        <MetricBar
-          label="Lead Fist Guard (High)"
-          value={pose.subScores.leadArmGuard}
-          accent="bg-indigo-400"
-        />
-        <MetricBar
-          label="Rear Fist Chamber (Low)"
-          value={pose.subScores.rearArmChamber}
-          accent="bg-indigo-400"
-        />
-        <MetricBar
-          label="Soryu Arm Asymmetry"
-          value={pose.subScores.armAsymmetry}
-          accent="bg-violet-400"
         />
       </div>
 
-      {/* Signal Processing Control */}
-      <div className="mt-3.5 flex items-center justify-between border-t border-slate-800/90 pt-3">
-        <div>
-          <div className="text-[11px] font-mono text-slate-200">One-Euro Filter</div>
-          <div className="text-[10px] text-slate-400">Adaptive jitter suppression</div>
-        </div>
+      {/* 4 monochrome/cyan sub-score hairlines */}
+      <div className="mt-2.5 space-y-2 border-t border-white/5 pt-2.5">
+        <HairlineMetric
+          label="HORSE STANCE"
+          value={pose.subScores.stanceWidth}
+        />
+        <HairlineMetric
+          label="CROUCH DEPTH"
+          value={pose.subScores.squatDepth}
+        />
+        <HairlineMetric
+          label="LEAD GUARD"
+          value={pose.subScores.leadArmGuard}
+        />
+        <HairlineMetric
+          label="REAR CHAMBER"
+          value={pose.subScores.rearArmChamber}
+        />
+      </div>
+
+      {/* 1€ Filter toggle control */}
+      <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2.5">
         <button
           type="button"
           onClick={onToggleOneEuro}
-          className={`rounded-full px-2.5 py-1 text-[11px] font-mono font-semibold transition cursor-pointer ${
+          className={`w-full rounded border py-1.5 text-[10px] font-mono tracking-wider transition cursor-pointer ${
             oneEuroEnabled
-              ? 'bg-cyan-500/25 text-cyan-200 border border-cyan-400/60'
-              : 'bg-slate-800 text-slate-400 border border-slate-700'
+              ? 'border-[#38bdf8]/40 bg-[#38bdf8]/10 text-[#38bdf8] hover:bg-[#38bdf8]/20'
+              : 'border-white/10 bg-white/5 text-slate-400 hover:text-slate-200'
           }`}
         >
-          {oneEuroEnabled ? 'ON' : 'RAW'}
+          {oneEuroEnabled ? '1€ FILTER: ACTIVE' : '1€ FILTER: BYPASS'}
         </button>
       </div>
 
-      <div className="mt-2 flex items-center justify-between text-[10px] font-mono text-slate-400">
-        <span>Lead Side: {pose.stanceSide}</span>
-        <span>Wrist v: {pose.wristSpeed.toFixed(2)}</span>
+      {/* Stance orientation & wrist speed */}
+      <div className="mt-2 flex items-center justify-between text-[9px] font-mono text-slate-500 pt-1">
+        <span>LEAD: {pose.stanceSide.toUpperCase()}</span>
+        <span className="tabular-nums">WRIST V: {pose.wristSpeed.toFixed(2)}</span>
       </div>
     </aside>
   );

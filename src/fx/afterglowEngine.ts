@@ -1,54 +1,6 @@
 import type { Landmark3D } from '../cv/oneEuroFilter';
-import { POSE_CONNECTIONS } from '../cv/poseLandmarker';
 import type { PoseEvaluation, PoseState, Vec2 } from '../cv/akazaPoseClassifier';
 import { drawSnowflakeCompass } from './compassRenderer';
-
-interface SlashBeam {
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-  cx: number;
-  cy: number;
-  age: number;
-  life: number;
-  thickness: number;
-  hue: 'cyan' | 'silver' | 'cobalt';
-}
-
-interface ShockwaveRing {
-  x: number;
-  y: number;
-  radius: number;
-  maxRadius: number;
-  age: number;
-  life: number;
-  lineWidth: number;
-  tiltY: number;
-}
-
-interface EnergySpark {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  size: number;
-  age: number;
-  life: number;
-  twinklePhase: number;
-  kind: 'diamond' | 'ember' | 'firework';
-  color: string;
-}
-
-interface SkeletonAfterimage {
-  points: Array<{ x: number; y: number; v: number }>;
-  offsetX: number;
-  offsetY: number;
-  vx: number;
-  vy: number;
-  age: number;
-  life: number;
-}
 
 export interface AfterglowFrameHooks {
   onActivate?: () => void;
@@ -57,83 +9,358 @@ export interface AfterglowFrameHooks {
   onDissipate?: () => void;
 }
 
+interface ChaoticNeedle {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  len: number;
+  angle: number;
+  age: number;
+  life: number;
+  thickness: number;
+  palette: 'cyan' | 'silver' | 'violet' | 'crimson';
+  isHero: boolean;
+}
+
+interface PlasmaRing {
+  x: number;
+  y: number;
+  radius: number;
+  maxRadius: number;
+  age: number;
+  life: number;
+  lineWidth: number;
+  tiltY: number;
+  color: string;
+}
+
+interface KoyukiParticle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  size: number;
+  age: number;
+  life: number;
+  twinklePhase: number;
+  kind: 'firework' | 'ember' | 'glint';
+  color: string;
+}
+
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 
-/** O(1) swap-remove helper to avoid array shifting during particle updates. */
+/** O(1) swap-remove helper to avoid GC array shifting */
 function swapRemove<T>(arr: T[], index: number): void {
   const last = arr.length - 1;
   if (index !== last) arr[index] = arr[last];
   arr.pop();
 }
 
+// ============================================================================
+// PRE-BAKED OFFSCREEN SPRITES (Allocated ONCE, zero per-frame shadowBlur)
+// ============================================================================
+
+let needleSprite: HTMLCanvasElement | null = null;
+let starGlintSprite: HTMLCanvasElement | null = null;
+let WISP_SPRITE: HTMLCanvasElement | null = null;
+
 /**
- * 60fps Anime VFX Compositor for:
- *   Akaza's Destructive Death — Final Form: Blue Silver Chaotic Afterglow
- *   (破壊殺・終式 青銀亂殘光)
+ * Pre-bakes a razor-sharp double-tapered supersonic blue-silver needle (256×32):
+ *  - Pointed supersonic head tip at right
+ *  - Narrow angled shoulder
+ *  - Razor tail tapering to left
+ *  - Pre-baked #00f0ff / #7c3aed outer glow + pure #ffffff core
+ */
+function getNeedleSprite(): HTMLCanvasElement | null {
+  if (needleSprite) return needleSprite;
+  if (typeof document === 'undefined') return null;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 32;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  const cy = 16;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+
+  // Bake outer supersonic glow once
+  ctx.shadowColor = '#00f0ff';
+  ctx.shadowBlur = 10;
+
+  // Double-tapered diamond-needle hull
+  // Tail: (8, cy), Shoulder: (212, cy - 6) & (212, cy + 6), Tip: (250, cy)
+  const grad = ctx.createLinearGradient(8, 0, 250, 0);
+  grad.addColorStop(0, 'rgba(124, 58, 237, 0)');
+  grad.addColorStop(0.25, 'rgba(124, 58, 237, 0.7)');
+  grad.addColorStop(0.65, 'rgba(0, 240, 255, 0.95)');
+  grad.addColorStop(0.92, '#e0f2fe');
+  grad.addColorStop(1, '#ffffff');
+
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(8, cy);
+  ctx.lineTo(212, cy - 6);
+  ctx.lineTo(250, cy);
+  ctx.lineTo(212, cy + 6);
+  ctx.closePath();
+  ctx.fill();
+
+  // Razor #ffffff core spine
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  ctx.moveTo(18, cy);
+  ctx.lineTo(248, cy);
+  ctx.stroke();
+
+  ctx.restore();
+  needleSprite = canvas;
+  return needleSprite;
+}
+
+/**
+ * Pre-bakes a crisp faceted 4-point beveled diamond crystal glint (96×96):
+ *  - 4 razor diamond points with beveled facets (#38bdf8 / #e0f2fe)
+ *  - 45° secondary micro-points
+ *  - Pure #ffffff center
+ */
+function getStarGlintSprite(): HTMLCanvasElement | null {
+  if (starGlintSprite) return starGlintSprite;
+  if (typeof document === 'undefined') return null;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 96;
+  canvas.height = 96;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  const cx = 48;
+  const cy = 48;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+
+  // Baked outer glow
+  ctx.shadowColor = 'rgba(56, 189, 248, 0.95)';
+  ctx.shadowBlur = 14;
+
+  // Primary 4 diamond points (R = 42)
+  const rMajor = 42;
+  const wHalf = 3.6;
+
+  // Left facet (#0ea5e9)
+  ctx.fillStyle = '#0ea5e9';
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - rMajor);
+  ctx.lineTo(cx - wHalf, cy);
+  ctx.lineTo(cx, cy);
+  ctx.moveTo(cx, cy + rMajor);
+  ctx.lineTo(cx + wHalf, cy);
+  ctx.lineTo(cx, cy);
+  ctx.moveTo(cx - rMajor, cy);
+  ctx.lineTo(cx, cy + wHalf);
+  ctx.lineTo(cx, cy);
+  ctx.moveTo(cx + rMajor, cy);
+  ctx.lineTo(cx, cy - wHalf);
+  ctx.lineTo(cx, cy);
+  ctx.fill();
+
+  // Right facet (#e0f2fe)
+  ctx.fillStyle = '#e0f2fe';
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - rMajor);
+  ctx.lineTo(cx + wHalf, cy);
+  ctx.lineTo(cx, cy);
+  ctx.moveTo(cx, cy + rMajor);
+  ctx.lineTo(cx - wHalf, cy);
+  ctx.lineTo(cx, cy);
+  ctx.moveTo(cx - rMajor, cy);
+  ctx.lineTo(cx, cy - wHalf);
+  ctx.lineTo(cx, cy);
+  ctx.moveTo(cx + rMajor, cy);
+  ctx.lineTo(cx, cy + wHalf);
+  ctx.lineTo(cx, cy);
+  ctx.fill();
+
+  // Diagonal micro-points (R = 18)
+  const rDiag = 18;
+  ctx.fillStyle = 'rgba(224, 242, 254, 0.85)';
+  for (let i = 0; i < 4; i++) {
+    const a = (i * Math.PI) / 2 + Math.PI / 4;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a) * rDiag, cy + Math.sin(a) * rDiag);
+    ctx.lineTo(cx + Math.cos(a + 0.15) * 4, cy + Math.sin(a + 0.15) * 4);
+    ctx.fill();
+  }
+
+  // Pure white diamond core
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 6);
+  ctx.lineTo(cx + 6, cy);
+  ctx.lineTo(cx, cy + 6);
+  ctx.lineTo(cx - 6, cy);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+  starGlintSprite = canvas;
+  return starGlintSprite;
+}
+
+/**
+ * Pre-bakes a single vertical volumetric aura wisp sprite (48×256):
+ *  - Deep indigo base #1d4ed8 at bottom
+ *  - Ice cyan #38bdf8 in lower-mid
+ *  - Pale silver #e0f2fe in upper-mid
+ *  - 0% alpha feather at top & outer edges
+ * Pre-baked once at module init to eliminate 14×/frame createLinearGradient.
+ */
+function getWispSprite(): HTMLCanvasElement | null {
+  if (WISP_SPRITE) return WISP_SPRITE;
+  if (typeof document === 'undefined') return null;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 48;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  const h = 256;
+  const cx = 24;
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+
+  // Vertical volumetric wisp gradient:
+  // Deep indigo base #1d4ed8 -> ice cyan #38bdf8 -> pale silver #e0f2fe -> 0% alpha feather at top & edges
+  const vertGrad = ctx.createLinearGradient(0, h, 0, 0);
+  vertGrad.addColorStop(0, 'rgba(29, 78, 216, 0)');
+  vertGrad.addColorStop(0.12, 'rgba(29, 78, 216, 0.75)');
+  vertGrad.addColorStop(0.48, 'rgba(56, 189, 248, 0.85)');
+  vertGrad.addColorStop(0.82, 'rgba(224, 242, 254, 0.95)');
+  vertGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+
+  // Volumetric wisp hull with horizontal feathering
+  ctx.fillStyle = vertGrad;
+  ctx.beginPath();
+  ctx.moveTo(cx - 16, h);
+  ctx.bezierCurveTo(cx - 20, h * 0.65, cx - 10, h * 0.25, cx, 0);
+  ctx.bezierCurveTo(cx + 10, h * 0.25, cx + 20, h * 0.65, cx + 16, h);
+  ctx.closePath();
+  ctx.fill();
+
+  // Core bright filament
+  const coreGrad = ctx.createLinearGradient(0, h, 0, 0);
+  coreGrad.addColorStop(0, 'rgba(56, 189, 248, 0)');
+  coreGrad.addColorStop(0.3, 'rgba(56, 189, 248, 0.7)');
+  coreGrad.addColorStop(0.75, 'rgba(224, 242, 254, 0.95)');
+  coreGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+
+  ctx.strokeStyle = coreGrad;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(cx, h);
+  ctx.bezierCurveTo(cx - 2, h * 0.6, cx + 2, h * 0.3, cx, 2);
+  ctx.stroke();
+
+  ctx.restore();
+  WISP_SPRITE = canvas;
+  return WISP_SPRITE;
+}
+
+// Module init pre-bake
+if (typeof document !== 'undefined') {
+  getNeedleSprite();
+  getStarGlintSprite();
+  getWispSprite();
+}
+
+/**
+ * ufotable-inspired Anime VFX Compositor:
+ * Akaza's Destructive Death – Final Form: Blue Silver Chaotic Afterglow
+ * (破壊殺・終式 青銀乱残光)
  *
- * Performance engineering:
- *   - ZERO per-frame `ctx.shadowBlur` calls (which trigger expensive Gaussian blurs per stroke
- *     on Retina displays). Glow bloom is achieved via pre-baked offscreen sprites (Compass &
- *     Calligraphy) + fast multi-pass additive (`lighter`) strokes.
- *   - O(1) swap-remove particle pools with hard upper caps.
+ * Back-to-Front Compositing Stack (Zero per-frame shadowBlur, locked 60fps):
+ *  1. 2-Frame Anime Impact Beat (cyan/crimson lateral rim split + micro camera shake)
+ *  2. Midnight Indigo Domain Grade & Vignette
+ *  3. 3D Floor Snowflake Compass (via drawSnowflakeCompass)
+ *  4. Face-Safe Volumetric Aura Wisps (strictly clamped below collarbone)
+ *  5. Fist Plasma Vortices (compact counter-rotating rings + micro-sparks + punch shockwaves)
+ *  6. 100-Strike Razor-Needle Chaotic Barrage (pre-baked supersonic needles + 4-vertex hero paths)
+ *  7. Koyuki Firework Starbursts (exponential drag deceleration + diamond glints)
+ *  8. Peripheral Kinetic Speed Lines & Calligraphy Banner
  */
 export class AfterglowFxEngine {
-  private slashes: SlashBeam[] = [];
-  private rings: ShockwaveRing[] = [];
-  private sparks: EnergySpark[] = [];
-  private afterimages: SkeletonAfterimage[] = [];
+  private needles: ChaoticNeedle[] = [];
+  private rings: PlasmaRing[] = [];
+  private particles: KoyukiParticle[] = [];
 
   private prevState: PoseState = 'IDLE';
   private timeSec = 0;
-  private flashAlpha = 0;
   private shakeMagnitude = 0;
-  private slashSpawnAcc = 0;
+  private needleSpawnAcc = 0;
   private fireworkSpawnAcc = 0;
-  private afterimageSpawnAcc = 0;
   private punchCooldown = 0;
   private soundTickAcc = 0;
 
-  // Smoothly interpolated floor & body anchors for buttery stability
+  // 2-Frame Anime Impact Beat state
+  private impactBeatFrames = 0;
+  private impactFlashAlpha = 0;
+
+  // Smoothly interpolated anchors
   private smoothFloor: Vec2 = { x: 0.5, y: 0.85 };
   private smoothCenter: Vec2 = { x: 0.5, y: 0.5 };
   private smoothScale = 0.15;
   private anchorsInitialized = false;
 
-  // Offscreen cached calligraphy sprite (rebuilt only on font load or size bucket change)
+  // Offscreen Calligraphy Sprite
   private bannerSprite: HTMLCanvasElement | null = null;
-  private bannerMainSize = 0;
-  private bannerFontReady = false;
+  private bannerBucket = 0;
+
+  // Pre-allocated reusable vectors for zero per-frame hot-loop GC churn
+  private shakeOffset: Vec2 = { x: 0, y: 0 };
+  private floorPx: Vec2 = { x: 0, y: 0 };
+  private centerPx: Vec2 = { x: 0, y: 0 };
+  private leadWristPx: Vec2 = { x: 0, y: 0 };
+  private rearWristPx: Vec2 = { x: 0, y: 0 };
 
   constructor() {
-    if (typeof document !== 'undefined' && document.fonts) {
-      void document.fonts.ready.then(() => {
-        this.bannerFontReady = true;
-        this.bannerSprite = null;
-      });
+    if (typeof document !== 'undefined') {
+      getNeedleSprite();
+      getStarGlintSprite();
+      getWispSprite();
+      if (document.fonts) {
+        void document.fonts.ready.then(() => {
+          this.bannerSprite = null;
+        });
+      }
     }
   }
 
   reset(): void {
-    this.slashes.length = 0;
+    this.needles.length = 0;
     this.rings.length = 0;
-    this.sparks.length = 0;
-    this.afterimages.length = 0;
+    this.particles.length = 0;
     this.prevState = 'IDLE';
-    this.flashAlpha = 0;
+    this.impactBeatFrames = 0;
+    this.impactFlashAlpha = 0;
     this.shakeMagnitude = 0;
     this.anchorsInitialized = false;
   }
 
-  /**
-   * Returns current micro camera-shake pixel offset so the video canvas shakes
-   * in sync with the VFX overlay on activation impact.
-   */
-  getShakeOffset(): { x: number; y: number } {
-    if (this.shakeMagnitude <= 0.25) return { x: 0, y: 0 };
-    return {
-      x: (Math.random() - 0.5) * 2 * this.shakeMagnitude,
-      y: (Math.random() - 0.5) * 2 * this.shakeMagnitude,
-    };
+  getShakeOffset(): Vec2 {
+    if (this.shakeMagnitude <= 0.2) {
+      this.shakeOffset.x = 0;
+      this.shakeOffset.y = 0;
+      return this.shakeOffset;
+    }
+    this.shakeOffset.x = (Math.random() - 0.5) * 2 * this.shakeMagnitude;
+    this.shakeOffset.y = (Math.random() - 0.5) * 2 * this.shakeMagnitude;
+    return this.shakeOffset;
   }
 
   render(
@@ -162,7 +389,7 @@ export class AfterglowFxEngine {
       this.smoothScale = pose.bodyScale;
       this.anchorsInitialized = true;
     } else if (pose.hasPerson) {
-      const k = 1 - Math.exp(-dt * 12);
+      const k = 1 - Math.exp(-dt * 14);
       this.smoothFloor.x = lerp(this.smoothFloor.x, pose.floorAnchor.x, k);
       this.smoothFloor.y = lerp(this.smoothFloor.y, pose.floorAnchor.y, k);
       this.smoothCenter.x = lerp(this.smoothCenter.x, pose.bodyCenter.x, k);
@@ -170,172 +397,156 @@ export class AfterglowFxEngine {
       this.smoothScale = lerp(this.smoothScale, pose.bodyScale, k);
     }
 
-    const floorPx = { x: mapX(this.smoothFloor.x), y: mapY(this.smoothFloor.y) };
-    const centerPx = { x: mapX(this.smoothCenter.x), y: mapY(this.smoothCenter.y) };
-    const leadWristPx = { x: mapX(pose.leadWrist.x), y: mapY(pose.leadWrist.y) };
-    const rearWristPx = { x: mapX(pose.rearWrist.x), y: mapY(pose.rearWrist.y) };
+    this.floorPx.x = mapX(this.smoothFloor.x);
+    this.floorPx.y = mapY(this.smoothFloor.y);
+    this.centerPx.x = mapX(this.smoothCenter.x);
+    this.centerPx.y = mapY(this.smoothCenter.y);
+    this.leadWristPx.x = mapX(pose.leadWrist.x);
+    this.leadWristPx.y = mapY(pose.leadWrist.y);
+    this.rearWristPx.x = mapX(pose.rearWrist.x);
+    this.rearWristPx.y = mapY(pose.rearWrist.y);
+
+    const floorPx = this.floorPx;
+    const centerPx = this.centerPx;
+    const leadWristPx = this.leadWristPx;
+    const rearWristPx = this.rearWristPx;
     const minDim = Math.min(width, height);
 
-    // -----------------------------------------------------------------------
-    // State transitions & burst triggers
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // State Transitions & Triggers
+    // -------------------------------------------------------------------------
     if (this.prevState !== 'ACTIVE' && pose.state === 'ACTIVE') {
-      this.flashAlpha = 0.72;
-      this.shakeMagnitude = 11;
-      this.spawnActivationExplosion(centerPx, floorPx, width, height);
+      this.impactBeatFrames = 2;
+      this.impactFlashAlpha = 0.85;
+      this.shakeMagnitude = 12.0;
+      this.spawnActivationBlast(centerPx, floorPx, minDim);
       hooks?.onActivate?.();
     } else if (this.prevState === 'ACTIVE' && pose.state === 'DISSIPATING') {
       hooks?.onDissipate?.();
     }
     this.prevState = pose.state;
 
-    // Reactive punch shockwave bursts when moving fists sharply during ACTIVE
+    // Reactive punch burst
     if (pose.state === 'ACTIVE' && pose.wristSpeed > 1.35 && this.punchCooldown <= 0) {
-      this.punchCooldown = 0.24;
-      this.shakeMagnitude = Math.max(this.shakeMagnitude, 5.5);
-      this.spawnFireworkBurst(leadWristPx.x, leadWristPx.y, minDim * 0.22, 16);
-      this.rings.push({
-        x: leadWristPx.x,
-        y: leadWristPx.y,
-        radius: 12,
-        maxRadius: minDim * 0.34,
-        age: 0,
-        life: 0.38,
-        lineWidth: 4.5,
-        tiltY: 1,
-      });
-      for (let i = 0; i < 6; i++) {
-        this.spawnChaoticSlash(width, height, leadWristPx);
-      }
+      this.punchCooldown = 0.22;
+      this.impactBeatFrames = 2;
+      this.shakeMagnitude = Math.max(this.shakeMagnitude, 6.0);
+      this.spawnPunchShockwave(leadWristPx, centerPx, minDim);
       hooks?.onPunchBurst?.();
     }
 
-    // -----------------------------------------------------------------------
-    // Continuous particle & slash emission
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Continuous Spawning
+    // -------------------------------------------------------------------------
     if (pose.state === 'CHARGING') {
-      if (Math.random() < 0.75) {
+      if (Math.random() < 0.8) {
         const a = Math.random() * Math.PI * 2;
-        const dist = minDim * (0.25 + Math.random() * 0.25);
-        const sx = centerPx.x + Math.cos(a) * dist;
-        const sy = centerPx.y + Math.sin(a) * dist;
-        const speed = dist * 2.8;
-        this.sparks.push({
-          x: sx,
-          y: sy,
-          vx: -Math.cos(a) * speed,
-          vy: -Math.sin(a) * speed,
-          size: 2.5 + Math.random() * 3,
+        const dist = minDim * (0.2 + Math.random() * 0.25);
+        this.particles.push({
+          x: centerPx.x + Math.cos(a) * dist,
+          y: centerPx.y + Math.sin(a) * dist,
+          vx: -Math.cos(a) * dist * 3.2,
+          vy: -Math.sin(a) * dist * 3.2,
+          size: 2.2 + Math.random() * 2.8,
           age: 0,
-          life: 0.28 + Math.random() * 0.16,
+          life: 0.28,
           twinklePhase: Math.random() * Math.PI * 2,
-          kind: 'diamond',
-          color: '#7dd3fc',
+          kind: 'glint',
+          color: '#38bdf8',
         });
       }
     }
 
     if (pose.state === 'ACTIVE') {
-      const escalation = Math.min(1, 0.45 + pose.activeDurationSec * 0.42);
+      const escalation = Math.min(1, 0.45 + pose.activeDurationSec * 0.4);
 
-      // 100-strike chaotic afterglow slash barrage
-      this.slashSpawnAcc += dt * (18 + escalation * 26);
-      while (this.slashSpawnAcc >= 1) {
-        this.slashSpawnAcc -= 1;
-        this.spawnChaoticSlash(width, height, centerPx);
+      // 100-strike chaotic needle barrage
+      this.needleSpawnAcc += dt * (22 + escalation * 28);
+      while (this.needleSpawnAcc >= 1) {
+        this.needleSpawnAcc -= 1;
+        this.spawnChaoticNeedle(width, height, centerPx, minDim);
       }
 
-      // Periodic Koyuki-inspired blue-silver firework shockwave bursts
-      this.fireworkSpawnAcc += dt * (1.8 + escalation * 2.2);
+      // Koyuki firework starbursts
+      this.fireworkSpawnAcc += dt * (1.8 + escalation * 2.4);
       if (this.fireworkSpawnAcc >= 1) {
         this.fireworkSpawnAcc -= 1;
         const angle = Math.random() * Math.PI * 2;
-        const dist = minDim * (0.24 + Math.random() * 0.28);
-        const fx = Math.max(width * 0.08, Math.min(width * 0.92, centerPx.x + Math.cos(angle) * dist * 1.25));
+        const dist = minDim * (0.26 + Math.random() * 0.26);
+        const fx = Math.max(width * 0.08, Math.min(width * 0.92, centerPx.x + Math.cos(angle) * dist * 1.3));
         const fy = Math.max(height * 0.12, Math.min(height * 0.82, centerPx.y + Math.sin(angle) * dist * 0.85));
-        this.spawnFireworkBurst(fx, fy, minDim * (0.14 + Math.random() * 0.12), 14);
-        this.rings.push({
-          x: fx,
-          y: fy,
-          radius: 6,
-          maxRadius: minDim * (0.13 + Math.random() * 0.1),
-          age: 0,
-          life: 0.42,
-          lineWidth: 2.6,
-          tiltY: 1,
-        });
+        this.spawnKoyukiStarburst(fx, fy, minDim * 0.24, 18);
       }
 
-      // Ghostly cyan-silver afterimage clones of Akaza's live stance
-      this.afterimageSpawnAcc += dt * 4.4;
-      if (this.afterimageSpawnAcc >= 1 && landmarks && landmarks.length >= 29) {
-        this.afterimageSpawnAcc -= 1;
-        this.spawnAfterimage(landmarks, width, height, mirrored);
-      }
-
-      // Rising spirit embers & diamond glints from floor compass & wrists
+      // Rising icy floor embers & wrist micro-sparks
       for (let i = 0; i < 3; i++) {
-        const fromCompass = i < 2;
+        const fromFloor = i < 2;
         const angle = Math.random() * Math.PI * 2;
-        const rSpread = minDim * (0.12 + Math.random() * 0.26);
-        const sx = fromCompass
+        const rSpread = minDim * (0.12 + Math.random() * 0.28);
+        const sx = fromFloor
           ? floorPx.x + Math.cos(angle) * rSpread
-          : (Math.random() < 0.5 ? leadWristPx.x : rearWristPx.x) + (Math.random() - 0.5) * 32;
-        const sy = fromCompass
+          : (Math.random() < 0.5 ? leadWristPx.x : rearWristPx.x) + (Math.random() - 0.5) * 28;
+        const sy = fromFloor
           ? floorPx.y + Math.sin(angle) * rSpread * 0.28
-          : (Math.random() < 0.5 ? leadWristPx.y : rearWristPx.y) + (Math.random() - 0.5) * 32;
+          : (Math.random() < 0.5 ? leadWristPx.y : rearWristPx.y) + (Math.random() - 0.5) * 28;
 
-        this.sparks.push({
+        this.particles.push({
           x: sx,
           y: sy,
-          vx: (Math.random() - 0.5) * 45,
-          vy: -(65 + Math.random() * 145),
-          size: 2 + Math.random() * 4.2,
+          vx: (Math.random() - 0.5) * 40,
+          vy: -(60 + Math.random() * 120),
+          size: 2 + Math.random() * 3.5,
           age: 0,
-          life: 0.7 + Math.random() * 0.75,
+          life: 0.65 + Math.random() * 0.65,
           twinklePhase: Math.random() * Math.PI * 2,
-          kind: Math.random() < 0.42 ? 'diamond' : 'ember',
-          color: Math.random() < 0.45 ? '#f0f9ff' : '#38bdf8',
+          kind: Math.random() < 0.45 ? 'glint' : 'ember',
+          color: Math.random() < 0.5 ? '#f8fafc' : '#38bdf8',
         });
       }
 
       this.soundTickAcc += dt;
-      if (this.soundTickAcc >= 0.32) {
+      if (this.soundTickAcc >= 0.28) {
         this.soundTickAcc = 0;
         hooks?.onBarrageTick?.();
       }
     }
 
-    // Decay flash & shake
-    this.flashAlpha = Math.max(0, this.flashAlpha - dt * 2.2);
-    this.shakeMagnitude = Math.max(0, this.shakeMagnitude * Math.exp(-dt * 9.5));
+    // Decay impact & shake
+    this.impactFlashAlpha = Math.max(0, this.impactFlashAlpha - dt * 3.2);
+    this.shakeMagnitude = Math.max(0, this.shakeMagnitude * Math.exp(-dt * 9.0));
 
-    // Advance particles
+    // Particle updates
     this.updateParticles(dt);
 
-    // -----------------------------------------------------------------------
-    // RENDER LAYERS (Zero per-frame shadowBlur)
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // BACK-TO-FRONT COMPOSITING STACK (Locked 60fps, Zero per-frame shadowBlur)
+    // -------------------------------------------------------------------------
     ctx.clearRect(0, 0, width, height);
     const intensity = pose.effectIntensity;
 
     if (
       intensity <= 0.005 &&
-      this.slashes.length === 0 &&
+      this.needles.length === 0 &&
       this.rings.length === 0 &&
-      this.sparks.length === 0 &&
-      this.afterimages.length === 0
+      this.particles.length === 0 &&
+      this.impactBeatFrames === 0
     ) {
       return;
     }
 
-    // Layer 1: Midnight-indigo / deep-violet Domain atmosphere grade
-    if (intensity > 0.01) {
-      this.drawAtmosphereGrade(ctx, width, height, centerPx, intensity);
+    // Stack Layer 1: 2-Frame Anime Impact Beat (Rim split)
+    if (this.impactBeatFrames > 0) {
+      this.drawImpactBeat(ctx, width, height);
+      this.impactBeatFrames--;
     }
 
-    // Layer 2: Cached 3D Floor Snowflake Compass Needle (破壊殺・羅針)
-    const compassRadius = Math.max(minDim * 0.24, Math.min(width * 0.36, this.smoothScale * width * 1.95));
+    // Stack Layer 2: Midnight Indigo Domain Grade & Vignette
+    if (intensity > 0.01) {
+      this.drawDomainGrade(ctx, width, height, centerPx, intensity);
+    }
+
+    // Stack Layer 3: 3D Floor Snowflake Compass (破壊殺・羅針)
+    const compassRadius = Math.max(minDim * 0.24, Math.min(width * 0.38, this.smoothScale * width * 1.95));
     const unfold =
       pose.state === 'CHARGING'
         ? pose.chargeProgress * 0.45
@@ -351,227 +562,73 @@ export class AfterglowFxEngine {
       unfold,
       intensity: Math.max(intensity, pose.state === 'CHARGING' ? pose.chargeProgress * 0.35 : 0),
       timeSec: this.timeSec,
+      activeTime: pose.activeDurationSec,
     });
 
-    // Layer 3: Ghostly Blue-Silver Energy Afterimages
-    this.drawAfterimages(ctx);
-
-    // Layer 4: Body-anchored aura & blazing fist energy
-    if (intensity > 0.05 && pose.hasPerson) {
-      this.drawBodyAndFistAura(ctx, centerPx, leadWristPx, rearWristPx, minDim, intensity);
+    // Stack Layer 4: Face-Safe Volumetric Aura Wisps (strictly below collarbone)
+    if (intensity > 0.04 && pose.hasPerson) {
+      this.drawFaceSafeAuraWisps(ctx, landmarks, centerPx, minDim, intensity, mapY, mirrored, width);
     }
 
-    // Layer 5: Shockwave Rings & 100-Strike Chaotic Slashes (layered additive glow)
-    this.drawRings(ctx);
-    this.drawSlashes(ctx);
+    // Stack Layer 5: Fist Plasma Vortices & Directional Shockwaves
+    if (intensity > 0.05 && pose.hasPerson) {
+      this.drawFistVortices(ctx, leadWristPx, rearWristPx, minDim, intensity, pose.wristSpeed);
+    }
 
-    // Layer 6: Diamond Sparkles, Firework Filaments, & Rising Embers
-    this.drawSparks(ctx);
+    // Stack Layer 6: Plasma Rings & 100-Strike Razor-Needle Chaotic Barrage
+    this.drawPlasmaRings(ctx);
+    this.drawChaoticNeedles(ctx);
 
-    // Layer 7: Anime Speed Lines around screen periphery during ACTIVE
-    if (intensity > 0.25) {
+    // Stack Layer 7: Koyuki Firework Starbursts & Embers
+    this.drawKoyukiParticles(ctx);
+
+    // Stack Layer 8: Peripheral Kinetic Speed Lines & Calligraphy Banner
+    if (intensity > 0.22) {
       this.drawSpeedLines(ctx, width, height, centerPx, intensity);
     }
 
-    // Layer 8: Impact Flash
-    if (this.flashAlpha > 0.01) {
+    // Subtle Flash Overlay on Beat
+    if (this.impactFlashAlpha > 0.02) {
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      const flashGrad = ctx.createRadialGradient(
-        centerPx.x,
-        centerPx.y,
-        0,
-        centerPx.x,
-        centerPx.y,
-        Math.max(width, height) * 0.85,
-      );
-      flashGrad.addColorStop(0, `rgba(240, 249, 255, ${this.flashAlpha * 0.85})`);
-      flashGrad.addColorStop(0.4, `rgba(56, 189, 248, ${this.flashAlpha * 0.45})`);
-      flashGrad.addColorStop(1, 'rgba(30, 58, 138, 0)');
-      ctx.fillStyle = flashGrad;
+      ctx.fillStyle = `rgba(240, 249, 255, ${this.impactFlashAlpha * 0.5})`;
       ctx.fillRect(0, 0, width, height);
       ctx.restore();
     }
 
-    // Layer 9: Cached Calligraphy Title ("破壊殺・終式 青銀亂殘光") at Top Center
+    // Calligraphy Banner ("破壊殺・終式 青銀亂殘光")
     if (intensity > 0.08 && pose.state !== 'CHARGING') {
       this.drawCalligraphyBanner(ctx, width, height, intensity, pose.activeDurationSec);
     }
   }
 
-  private spawnActivationExplosion(center: Vec2, floor: Vec2, width: number, height: number): void {
-    const minDim = Math.min(width, height);
+  // ---------------------------------------------------------------------------
+  // Layer 1: 2-Frame Anime Impact Beat
+  // ---------------------------------------------------------------------------
+  private drawImpactBeat(ctx: CanvasRenderingContext2D, width: number, height: number): void {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
 
-    this.rings.push({
-      x: floor.x,
-      y: floor.y,
-      radius: 20,
-      maxRadius: minDim * 0.65,
-      age: 0,
-      life: 0.65,
-      lineWidth: 6,
-      tiltY: 0.30,
-    });
-    this.rings.push({
-      x: center.x,
-      y: center.y,
-      radius: 16,
-      maxRadius: minDim * 0.58,
-      age: 0,
-      life: 0.48,
-      lineWidth: 5,
-      tiltY: 1,
-    });
+    // High-contrast lateral chromatic rim split (#00f0ff on left, #ff1e56 on right)
+    const rimW = Math.max(4, Math.round(width * 0.008));
+    ctx.fillStyle = '#00f0ff';
+    ctx.fillRect(0, 0, rimW, height);
 
-    for (let i = 0; i < 18; i++) {
-      this.spawnChaoticSlash(width, height, center);
-    }
-    this.spawnFireworkBurst(center.x, center.y, minDim * 0.38, 36);
+    ctx.fillStyle = '#ff1e56';
+    ctx.fillRect(width - rimW, 0, rimW, height);
+
+    // Subtle center high-contrast shock slice
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+    ctx.fillRect(0, 0, width, Math.max(2, Math.round(height * 0.004)));
+    ctx.fillRect(0, height - Math.max(2, Math.round(height * 0.004)), width, height);
+
+    ctx.restore();
   }
 
-  private spawnChaoticSlash(width: number, height: number, center: Vec2): void {
-    const minDim = Math.min(width, height);
-    const isRadial = Math.random() < 0.55;
-
-    let x0: number, y0: number, x1: number, y1: number;
-    if (isRadial) {
-      const angle = Math.random() * Math.PI * 2;
-      const startDist = minDim * (0.04 + Math.random() * 0.16);
-      const len = minDim * (0.28 + Math.random() * 0.52);
-      x0 = center.x + Math.cos(angle) * startDist;
-      y0 = center.y + Math.sin(angle) * startDist;
-      x1 = center.x + Math.cos(angle) * (startDist + len);
-      y1 = center.y + Math.sin(angle) * (startDist + len);
-    } else {
-      const mx = width * (0.08 + Math.random() * 0.84);
-      const my = height * (0.10 + Math.random() * 0.78);
-      const angle = Math.random() * Math.PI * 2;
-      const halfLen = minDim * (0.14 + Math.random() * 0.28);
-      x0 = mx - Math.cos(angle) * halfLen;
-      y0 = my - Math.sin(angle) * halfLen;
-      x1 = mx + Math.cos(angle) * halfLen;
-      y1 = my + Math.sin(angle) * halfLen;
-    }
-
-    const midX = (x0 + x1) * 0.5;
-    const midY = (y0 + y1) * 0.5;
-    const perpX = -(y1 - y0);
-    const perpY = x1 - x0;
-    const curve = (Math.random() - 0.5) * 0.22;
-
-    const r = Math.random();
-    const hue: SlashBeam['hue'] = r < 0.45 ? 'cyan' : r < 0.82 ? 'silver' : 'cobalt';
-
-    this.slashes.push({
-      x0,
-      y0,
-      x1,
-      y1,
-      cx: midX + perpX * curve,
-      cy: midY + perpY * curve,
-      age: 0,
-      life: 0.16 + Math.random() * 0.22,
-      thickness: 1.5 + Math.random() * 3.8,
-      hue,
-    });
-  }
-
-  private spawnFireworkBurst(x: number, y: number, speedScale: number, count: number): void {
-    for (let i = 0; i < count; i++) {
-      const a = (i / count) * Math.PI * 2 + (Math.random() - 0.5) * 0.25;
-      const speed = speedScale * (1.2 + Math.random() * 1.9);
-      this.sparks.push({
-        x,
-        y,
-        vx: Math.cos(a) * speed,
-        vy: Math.sin(a) * speed,
-        size: 2.2 + Math.random() * 3.4,
-        age: 0,
-        life: 0.38 + Math.random() * 0.36,
-        twinklePhase: Math.random() * Math.PI * 2,
-        kind: 'firework',
-        color: i % 3 === 0 ? '#f8fafc' : i % 3 === 1 ? '#7dd3fc' : '#38bdf8',
-      });
-    }
-  }
-
-  private spawnAfterimage(
-    landmarks: Landmark3D[],
-    width: number,
-    height: number,
-    mirrored: boolean,
-  ): void {
-    const pts = landmarks.map((lm) => ({
-      x: (mirrored ? 1 - lm.x : lm.x) * width,
-      y: lm.y * height,
-      v: lm.visibility ?? 1,
-    }));
-    const angle = Math.random() < 0.5 ? (Math.random() - 0.5) * 0.6 : Math.PI + (Math.random() - 0.5) * 0.6;
-    const speed = 130 + Math.random() * 160;
-    this.afterimages.push({
-      points: pts,
-      offsetX: 0,
-      offsetY: 0,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed * 0.35 - 18,
-      age: 0,
-      life: 0.42,
-    });
-  }
-
-  private updateParticles(dt: number): void {
-    for (let i = this.slashes.length - 1; i >= 0; i--) {
-      this.slashes[i].age += dt;
-      if (this.slashes[i].age >= this.slashes[i].life) {
-        swapRemove(this.slashes, i);
-      }
-    }
-
-    for (let i = this.rings.length - 1; i >= 0; i--) {
-      const r = this.rings[i];
-      r.age += dt;
-      const t = Math.min(1, r.age / r.life);
-      r.radius = r.maxRadius * (1 - Math.pow(1 - t, 3));
-      if (r.age >= r.life) {
-        swapRemove(this.rings, i);
-      }
-    }
-
-    const drag = Math.exp(-dt * 4.5);
-    for (let i = this.sparks.length - 1; i >= 0; i--) {
-      const s = this.sparks[i];
-      s.age += dt;
-      s.x += s.vx * dt;
-      s.y += s.vy * dt;
-      if (s.kind === 'firework') {
-        s.vx *= drag;
-        s.vy *= drag;
-        s.vy += 40 * dt;
-      }
-      if (s.age >= s.life) {
-        swapRemove(this.sparks, i);
-      }
-    }
-
-    const imgDrag = Math.exp(-dt * 2.5);
-    for (let i = this.afterimages.length - 1; i >= 0; i--) {
-      const a = this.afterimages[i];
-      a.age += dt;
-      a.offsetX += a.vx * dt;
-      a.offsetY += a.vy * dt;
-      a.vx *= imgDrag;
-      if (a.age >= a.life) {
-        swapRemove(this.afterimages, i);
-      }
-    }
-
-    // Hard pool caps for guaranteed 60fps
-    if (this.slashes.length > 85) this.slashes.length = 85;
-    if (this.sparks.length > 240) this.sparks.length = 240;
-    if (this.afterimages.length > 8) this.afterimages.length = 8;
-  }
-
-  private drawAtmosphereGrade(
+  // ---------------------------------------------------------------------------
+  // Layer 2: Midnight Indigo Domain Grade & Vignette
+  // ---------------------------------------------------------------------------
+  private drawDomainGrade(
     ctx: CanvasRenderingContext2D,
     width: number,
     height: number,
@@ -579,126 +636,203 @@ export class AfterglowFxEngine {
     intensity: number,
   ): void {
     ctx.save();
-    ctx.fillStyle = `rgba(18, 12, 46, ${0.42 * intensity})`;
+    // Midnight atmospheric base tint
+    ctx.fillStyle = `rgba(6, 8, 24, ${0.44 * intensity})`;
     ctx.fillRect(0, 0, width, height);
 
+    // Deep-violet vignette
     const vig = ctx.createRadialGradient(
       center.x,
       center.y,
-      Math.min(width, height) * 0.14,
+      Math.min(width, height) * 0.16,
       center.x,
       center.y,
       Math.max(width, height) * 0.78,
     );
-    vig.addColorStop(0, `rgba(56, 189, 248, ${0.06 * intensity})`);
-    vig.addColorStop(0.55, `rgba(24, 18, 62, ${0.22 * intensity})`);
-    vig.addColorStop(1, `rgba(6, 8, 28, ${0.62 * intensity})`);
+    vig.addColorStop(0, `rgba(56, 189, 248, ${0.05 * intensity})`);
+    vig.addColorStop(0.5, `rgba(17, 14, 56, ${0.25 * intensity})`);
+    vig.addColorStop(1, `rgba(6, 8, 24, ${0.68 * intensity})`);
     ctx.fillStyle = vig;
     ctx.fillRect(0, 0, width, height);
     ctx.restore();
   }
 
-  private drawAfterimages(ctx: CanvasRenderingContext2D): void {
-    if (this.afterimages.length === 0) return;
+  // ---------------------------------------------------------------------------
+  // Layer 4: Face-Safe Volumetric Aura Wisps (Strictly clamped below collarbone)
+  // ---------------------------------------------------------------------------
+  private drawFaceSafeAuraWisps(
+    ctx: CanvasRenderingContext2D,
+    landmarks: Landmark3D[] | null,
+    center: Vec2,
+    minDim: number,
+    intensity: number,
+    mapY: (ny: number) => number,
+    mirrored: boolean,
+    width: number,
+  ): void {
+    // Strictly determine collarbone level (y >= collarY)
+    let collarY = center.y - minDim * 0.14;
+    let shoulderLeftX = center.x - minDim * 0.18;
+    let shoulderRightX = center.x + minDim * 0.18;
+
+    if (landmarks && landmarks.length >= 25) {
+      const ls = landmarks[11]; // Left shoulder
+      const rs = landmarks[12]; // Right shoulder
+      if (ls && rs && (ls.visibility ?? 1) > 0.3 && (rs.visibility ?? 1) > 0.3) {
+        // Safe collar level: 12px BELOW the lower shoulder joint
+        collarY = Math.max(mapY(ls.y), mapY(rs.y)) + 12;
+        shoulderLeftX = (mirrored ? 1 - ls.x : ls.x) * width;
+        shoulderRightX = (mirrored ? 1 - rs.x : rs.x) * width;
+      }
+    }
+
+    const sprite = getWispSprite();
+    if (!sprite) return;
+
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
 
-    for (const img of this.afterimages) {
-      const t = img.age / img.life;
-      const alpha = (1 - t) * (1 - t) * 0.42;
-      if (alpha <= 0.01) continue;
+    const wispCount = 14;
+    const pulse = 0.85 + 0.15 * Math.sin(this.timeSec * 8);
 
-      ctx.beginPath();
-      for (const [a, b] of POSE_CONNECTIONS) {
-        const pa = img.points[a];
-        const pb = img.points[b];
-        if (!pa || !pb || pa.v < 0.25 || pb.v < 0.25) continue;
-        ctx.moveTo(pa.x + img.offsetX, pa.y + img.offsetY);
-        ctx.lineTo(pb.x + img.offsetX, pb.y + img.offsetY);
-      }
+    for (let i = 0; i < wispCount; i++) {
+      const frac = i / (wispCount - 1);
+      const isLeft = frac < 0.5;
+      const tSide = isLeft ? frac * 2 : (frac - 0.5) * 2;
+      const rootX = isLeft
+        ? lerp(shoulderLeftX - minDim * 0.15, center.x - minDim * 0.05, tSide)
+        : lerp(center.x + minDim * 0.05, shoulderRightX + minDim * 0.15, tSide);
+      const rootY = center.y + minDim * (0.05 + Math.sin(i * 1.7) * 0.2);
 
-      // Layered additive glow (no shadowBlur Gaussian overhead)
-      ctx.strokeStyle = `rgba(56, 189, 248, ${alpha * 0.42})`;
-      ctx.lineWidth = 14 * (1 - t * 0.35);
-      ctx.stroke();
+      const wispH = minDim * (0.22 + Math.sin(i * 3.1 + this.timeSec * 6) * 0.08);
+      const targetY = rootY - wispH;
 
-      ctx.strokeStyle = `rgba(125, 211, 252, ${alpha * 0.85})`;
-      ctx.lineWidth = 5.5 * (1 - t * 0.35);
-      ctx.stroke();
+      // Strictly clamp and fade wisps as they approach collarbone
+      const clampedTargetY = Math.max(collarY + 8, targetY);
+      if (rootY <= collarY + 6) continue;
 
-      ctx.strokeStyle = `rgba(240, 249, 255, ${alpha * 0.9})`;
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      const actualH = rootY - clampedTargetY;
+      if (actualH <= 1) continue;
+
+      const sway = Math.sin(this.timeSec * 6.5 + i * 0.85) * minDim * 0.04;
+      const angle = Math.atan2(sway, actualH);
+      const wispW = Math.max(12, minDim * 0.045 * (1 - tSide * 0.25));
+
+      ctx.save();
+      ctx.translate(rootX, rootY);
+      ctx.rotate(angle);
+      ctx.globalAlpha = Math.min(1, intensity * pulse * 0.85);
+      ctx.drawImage(sprite, -wispW * 0.5, -actualH, wispW, actualH);
+      ctx.restore();
     }
+
     ctx.restore();
   }
 
-  private drawBodyAndFistAura(
+  // ---------------------------------------------------------------------------
+  // Layer 5: Fist Plasma Vortices & Directional Shockwaves
+  // ---------------------------------------------------------------------------
+  private drawFistVortices(
     ctx: CanvasRenderingContext2D,
-    center: Vec2,
     leadWrist: Vec2,
     rearWrist: Vec2,
     minDim: number,
     intensity: number,
+    wristSpeed: number,
   ): void {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const pulse = 0.85 + 0.15 * Math.sin(this.timeSec * 12);
+    const glint = getStarGlintSprite();
 
-    const bodyGlow = ctx.createRadialGradient(
-      center.x,
-      center.y,
-      minDim * 0.02,
-      center.x,
-      center.y,
-      minDim * 0.26,
-    );
-    bodyGlow.addColorStop(0, `rgba(186, 230, 253, ${0.14 * intensity * pulse})`);
-    bodyGlow.addColorStop(0.5, `rgba(56, 189, 248, ${0.10 * intensity})`);
-    bodyGlow.addColorStop(1, 'rgba(37, 99, 235, 0)');
-    ctx.fillStyle = bodyGlow;
-    ctx.beginPath();
-    ctx.arc(center.x, center.y, minDim * 0.26, 0, Math.PI * 2);
-    ctx.fill();
+    const drawVortex = (pos: Vec2, scale: number, isLead: boolean) => {
+      const rInner = minDim * 0.038 * scale;
+      const rOuter = minDim * 0.062 * scale;
+      const rot1 = this.timeSec * 7.5;
+      const rot2 = -this.timeSec * 9.2;
 
-    const drawFistFlare = (pos: Vec2, sizeMul: number) => {
-      const r = minDim * 0.075 * sizeMul * pulse;
-      const g = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, r);
-      g.addColorStop(0, `rgba(255, 255, 255, ${0.85 * intensity})`);
-      g.addColorStop(0.28, `rgba(125, 211, 252, ${0.58 * intensity})`);
-      g.addColorStop(0.65, `rgba(14, 165, 233, ${0.22 * intensity})`);
-      g.addColorStop(1, 'rgba(14, 165, 233, 0)');
-      ctx.fillStyle = g;
+      // Inner counter-rotating plasma ring
+      ctx.save();
+      ctx.translate(pos.x, pos.y);
+      ctx.rotate(rot1);
+      ctx.strokeStyle = `rgba(56, 189, 248, ${0.85 * intensity})`;
+      ctx.lineWidth = 2.2;
       ctx.beginPath();
-      ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.ellipse(0, 0, rInner, rInner * 0.55, 0, 0, Math.PI * 2);
+      ctx.stroke();
 
-      const starR = r * 0.78;
-      ctx.fillStyle = `rgba(240, 249, 255, ${0.85 * intensity})`;
+      // Core white ring
+      ctx.strokeStyle = `rgba(255, 255, 255, ${0.95 * intensity})`;
+      ctx.lineWidth = 1.2;
       ctx.beginPath();
-      ctx.moveTo(pos.x, pos.y - starR);
-      ctx.quadraticCurveTo(pos.x, pos.y, pos.x + starR * 0.72, pos.y);
-      ctx.quadraticCurveTo(pos.x, pos.y, pos.x, pos.y + starR);
-      ctx.quadraticCurveTo(pos.x, pos.y, pos.x - starR * 0.72, pos.y);
-      ctx.quadraticCurveTo(pos.x, pos.y, pos.x, pos.y - starR);
-      ctx.fill();
+      ctx.ellipse(0, 0, rInner * 0.85, rInner * 0.42, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+
+      // Outer plasma ring
+      ctx.save();
+      ctx.translate(pos.x, pos.y);
+      ctx.rotate(rot2);
+      ctx.strokeStyle = `rgba(124, 58, 237, ${0.65 * intensity})`;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, rOuter, rOuter * 0.45, 0, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Orbiting pinpoint micro-sparks
+      const sparkCount = 4;
+      for (let s = 0; s < sparkCount; s++) {
+        const sa = (s * Math.PI) / 2 + rot2;
+        const sx = Math.cos(sa) * rOuter;
+        const sy = Math.sin(sa) * rOuter * 0.45;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(sx, sy, 1.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // Compact diamond glint at wrist center
+      if (glint) {
+        const glintSize = minDim * 0.075 * scale;
+        ctx.drawImage(glint, pos.x - glintSize * 0.5, pos.y - glintSize * 0.5, glintSize, glintSize);
+      }
+
+      // Conical punch shockwave when moving fast
+      if (isLead && wristSpeed > 1.35) {
+        ctx.save();
+        ctx.translate(pos.x, pos.y);
+        const coneGrad = ctx.createRadialGradient(0, 0, 5, 0, 0, minDim * 0.18);
+        coneGrad.addColorStop(0, `rgba(255, 255, 255, ${0.85 * intensity})`);
+        coneGrad.addColorStop(0.3, `rgba(56, 189, 248, ${0.55 * intensity})`);
+        coneGrad.addColorStop(1, 'rgba(56, 189, 248, 0)');
+        ctx.fillStyle = coneGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, minDim * 0.18, -Math.PI * 0.35, Math.PI * 0.35);
+        ctx.lineTo(0, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
     };
 
-    drawFistFlare(leadWrist, 1.15);
-    drawFistFlare(rearWrist, 0.9);
+    drawVortex(leadWrist, 1.15, true);
+    drawVortex(rearWrist, 0.9, false);
+
     ctx.restore();
   }
 
-  private drawRings(ctx: CanvasRenderingContext2D): void {
+  // ---------------------------------------------------------------------------
+  // Layer 6: Plasma Rings & 100-Strike Razor-Needle Chaotic Barrage
+  // ---------------------------------------------------------------------------
+  private drawPlasmaRings(ctx: CanvasRenderingContext2D): void {
     if (this.rings.length === 0) return;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
+
     for (const r of this.rings) {
       const t = r.age / r.life;
       const alpha = (1 - t) * (1 - t);
-      const baseW = Math.max(1, r.lineWidth * (1 - t * 0.7));
+      const w = Math.max(1, r.lineWidth * (1 - t * 0.65));
 
       ctx.save();
       ctx.translate(r.x, r.y);
@@ -706,114 +840,134 @@ export class AfterglowFxEngine {
       ctx.beginPath();
       ctx.arc(0, 0, r.radius, 0, Math.PI * 2);
 
-      // Soft outer halo stroke
-      ctx.strokeStyle = `rgba(56, 189, 248, ${alpha * 0.38})`;
-      ctx.lineWidth = baseW * 3.4;
+      // Outer color stroke
+      ctx.strokeStyle = r.color.replace(')', `, ${alpha * 0.85})`).replace('rgb', 'rgba');
+      ctx.lineWidth = w * 2.8;
       ctx.stroke();
 
-      // Crisp luminous inner shockwave ring
-      ctx.strokeStyle = `rgba(224, 242, 254, ${alpha * 0.92})`;
-      ctx.lineWidth = baseW;
+      // Sharp white inner shock rim
+      ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.95})`;
+      ctx.lineWidth = w;
       ctx.stroke();
       ctx.restore();
     }
+
     ctx.restore();
   }
 
-  private drawSlashes(ctx: CanvasRenderingContext2D): void {
-    if (this.slashes.length === 0) return;
+  private drawChaoticNeedles(ctx: CanvasRenderingContext2D): void {
+    if (this.needles.length === 0) return;
+    const needleSprite = getNeedleSprite();
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    ctx.lineCap = 'round';
 
-    for (const s of this.slashes) {
-      const t = s.age / s.life;
-      const alpha = t < 0.18 ? t / 0.18 : Math.pow(1 - (t - 0.18) / 0.82, 1.6);
+    for (const n of this.needles) {
+      const t = n.age / n.life;
+      const alpha = t < 0.16 ? t / 0.16 : Math.pow(1 - (t - 0.16) / 0.84, 1.5);
       if (alpha <= 0.01) continue;
 
-      const w = s.thickness * (1.8 - t * 0.7);
-      const bloomColor =
-        s.hue === 'cyan'
-          ? `rgba(56, 189, 248, ${alpha * 0.34})`
-          : s.hue === 'silver'
-            ? `rgba(203, 213, 225, ${alpha * 0.30})`
-            : `rgba(96, 165, 250, ${alpha * 0.32})`;
+      const midX = (n.x0 + n.x1) * 0.5;
+      const midY = (n.y0 + n.y1) * 0.5;
 
-      const midColor =
-        s.hue === 'cyan'
-          ? `rgba(125, 211, 252, ${alpha * 0.85})`
-          : s.hue === 'silver'
-            ? `rgba(226, 232, 240, ${alpha * 0.82})`
-            : `rgba(147, 197, 253, ${alpha * 0.85})`;
+      ctx.save();
+      ctx.translate(midX, midY);
+      ctx.rotate(n.angle);
+      ctx.globalAlpha = alpha;
 
-      ctx.beginPath();
-      ctx.moveTo(s.x0, s.y0);
-      ctx.quadraticCurveTo(s.cx, s.cy, s.x1, s.y1);
+      if (needleSprite && !n.isHero) {
+        // Fast GPU drawImage of pre-baked double-tapered needle sprite
+        const drawW = n.len;
+        const drawH = Math.max(10, n.thickness * 7.5);
+        ctx.drawImage(needleSprite, -drawW * 0.5, -drawH * 0.5, drawW, drawH);
+      } else {
+        // Hero 4-vertex tapered diamond-needle polygon
+        const halfL = n.len * 0.5;
+        const shoulderX = halfL * 0.72;
+        const shoulderW = n.thickness * 2.4;
 
-      // Wide additive glow halo (replaces costly shadowBlur!)
-      ctx.strokeStyle = bloomColor;
-      ctx.lineWidth = w * 3.4;
-      ctx.stroke();
+        let fillCol = '#00f0ff';
+        if (n.palette === 'violet') fillCol = '#7c3aed';
+        else if (n.palette === 'silver') fillCol = '#f8fafc';
+        else if (n.palette === 'crimson') fillCol = '#ff1e56';
 
-      // Vibrant colored blade body
-      ctx.strokeStyle = midColor;
-      ctx.lineWidth = w;
-      ctx.stroke();
+        ctx.fillStyle = fillCol;
+        ctx.beginPath();
+        ctx.moveTo(-halfL, 0); // Tail
+        ctx.lineTo(shoulderX, -shoulderW); // Shoulder top
+        ctx.lineTo(halfL, 0); // Supersonic needle tip
+        ctx.lineTo(shoulderX, shoulderW); // Shoulder bottom
+        ctx.closePath();
+        ctx.fill();
 
-      // Razor-sharp white-silver inner core
-      ctx.strokeStyle = `rgba(248, 250, 252, ${alpha * 0.96})`;
-      ctx.lineWidth = Math.max(0.9, w * 0.38);
-      ctx.stroke();
+        // Razor #ffffff core
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = Math.max(1.2, n.thickness * 0.6);
+        ctx.beginPath();
+        ctx.moveTo(-halfL * 0.8, 0);
+        ctx.lineTo(halfL, 0);
+        ctx.stroke();
+      }
+
+      ctx.restore();
     }
+
     ctx.restore();
   }
 
-  private drawSparks(ctx: CanvasRenderingContext2D): void {
-    if (this.sparks.length === 0) return;
+  // ---------------------------------------------------------------------------
+  // Layer 7: Koyuki Firework Starbursts & Embers
+  // ---------------------------------------------------------------------------
+  private drawKoyukiParticles(ctx: CanvasRenderingContext2D): void {
+    if (this.particles.length === 0) return;
+    const glint = getStarGlintSprite();
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
 
-    for (const s of this.sparks) {
-      const t = s.age / s.life;
-      const fade = t < 0.15 ? t / 0.15 : 1 - (t - 0.15) / 0.85;
-      const twinkle = 0.72 + 0.28 * Math.sin(this.timeSec * 18 + s.twinklePhase);
+    for (const p of this.particles) {
+      const t = p.age / p.life;
+      const fade = t < 0.12 ? t / 0.12 : 1 - (t - 0.12) / 0.88;
+      const twinkle = 0.75 + 0.25 * Math.sin(this.timeSec * 16 + p.twinklePhase);
       const alpha = Math.max(0, fade * twinkle);
       if (alpha <= 0.01) continue;
 
       ctx.globalAlpha = alpha;
 
-      if (s.kind === 'firework') {
-        const tailX = s.x - s.vx * 0.045;
-        const tailY = s.y - s.vy * 0.045;
-        ctx.strokeStyle = s.color;
-        ctx.lineWidth = Math.max(1.2, s.size * 0.55);
+      if (p.kind === 'firework') {
+        // Chrysanthemum / willow filament trail
+        const tailX = p.x - p.vx * 0.038;
+        const tailY = p.y - p.vy * 0.038;
+        ctx.strokeStyle = p.color;
+        ctx.lineWidth = Math.max(1.2, p.size * 0.55);
         ctx.beginPath();
         ctx.moveTo(tailX, tailY);
-        ctx.lineTo(s.x, s.y);
+        ctx.lineTo(p.x, p.y);
         ctx.stroke();
 
-        ctx.fillStyle = '#ffffff';
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, s.size * 0.45, 0, Math.PI * 2);
-        ctx.fill();
-      } else if (s.kind === 'diamond') {
-        const r = s.size * 1.45;
-        ctx.fillStyle = s.color;
-        ctx.beginPath();
-        ctx.moveTo(s.x, s.y - r);
-        ctx.lineTo(s.x + r * 0.28, s.y - r * 0.28);
-        ctx.lineTo(s.x + r, s.y);
-        ctx.lineTo(s.x + r * 0.28, s.y + r * 0.28);
-        ctx.lineTo(s.x, s.y + r);
-        ctx.lineTo(s.x - r * 0.28, s.y + r * 0.28);
-        ctx.lineTo(s.x - r, s.y);
-        ctx.lineTo(s.x - r * 0.28, s.y - r * 0.28);
-        ctx.closePath();
-        ctx.fill();
+        // Faceted diamond glint head
+        if (glint && p.size > 2.8) {
+          const gSize = p.size * 3.8;
+          ctx.drawImage(glint, p.x - gSize * 0.5, p.y - gSize * 0.5, gSize, gSize);
+        } else {
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * 0.45, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else if (p.kind === 'glint') {
+        if (glint) {
+          const gSize = p.size * 4.2;
+          ctx.drawImage(glint, p.x - gSize * 0.5, p.y - gSize * 0.5, gSize, gSize);
+        } else {
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * 0.6, 0, Math.PI * 2);
+          ctx.fill();
+        }
       } else {
-        ctx.fillStyle = s.color;
+        // Winter ember
+        ctx.fillStyle = p.color;
         ctx.beginPath();
-        ctx.arc(s.x, s.y, s.size * 0.6, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, p.size * 0.55, 0, Math.PI * 2);
         ctx.fill();
       }
     }
@@ -821,6 +975,9 @@ export class AfterglowFxEngine {
     ctx.restore();
   }
 
+  // ---------------------------------------------------------------------------
+  // Layer 8: Peripheral Speed Lines & Calligraphy Banner
+  // ---------------------------------------------------------------------------
   private drawSpeedLines(
     ctx: CanvasRenderingContext2D,
     width: number,
@@ -831,14 +988,14 @@ export class AfterglowFxEngine {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     const maxR = Math.hypot(width, height) * 0.65;
-    const count = 28;
-    const flickerSeed = Math.floor(this.timeSec * 24);
+    const count = 30;
+    const seed = Math.floor(this.timeSec * 24);
 
     for (let i = 0; i < count; i++) {
-      const h = Math.sin((i + 1) * 127.1 + flickerSeed * 311.7) * 43758.5453;
+      const h = Math.sin((i + 1) * 127.1 + seed * 311.7) * 43758.5453;
       const frac = h - Math.floor(h);
-      const angle = (i / count) * Math.PI * 2 + (frac - 0.5) * 0.14;
-      const innerR = maxR * (0.48 + frac * 0.22);
+      const angle = (i / count) * Math.PI * 2 + (frac - 0.5) * 0.12;
+      const innerR = maxR * (0.52 + frac * 0.24);
       const outerR = maxR * 1.15;
 
       const x0 = center.x + Math.cos(angle) * innerR;
@@ -846,8 +1003,8 @@ export class AfterglowFxEngine {
       const x1 = center.x + Math.cos(angle) * outerR;
       const y1 = center.y + Math.sin(angle) * outerR;
 
-      ctx.strokeStyle = `rgba(186, 230, 253, ${0.14 * intensity * (0.4 + frac * 0.6)})`;
-      ctx.lineWidth = 1 + frac * 1.8;
+      ctx.strokeStyle = `rgba(186, 230, 253, ${0.16 * intensity * (0.4 + frac * 0.6)})`;
+      ctx.lineWidth = 1.0 + frac * 1.6;
       ctx.beginPath();
       ctx.moveTo(x0, y0);
       ctx.lineTo(x1, y1);
@@ -857,16 +1014,15 @@ export class AfterglowFxEngine {
   }
 
   private getCalligraphySprite(mainSize: number): HTMLCanvasElement | null {
-    // Quantize to 4px buckets so window resize doesn't constantly rebuild
     const bucket = Math.round(mainSize / 4) * 4;
-    if (this.bannerSprite && this.bannerMainSize === bucket) {
+    if (this.bannerSprite && this.bannerBucket === bucket) {
       return this.bannerSprite;
     }
     if (typeof document === 'undefined') return null;
 
     const subSize = Math.max(12, Math.round(bucket * 0.28));
-    const padX = Math.round(bucket * 4.4);
-    const padY = Math.round(bucket * 1.65);
+    const padX = Math.round(bucket * 4.6);
+    const padY = Math.round(bucket * 1.7);
 
     const canvas = document.createElement('canvas');
     canvas.width = padX * 2;
@@ -881,17 +1037,17 @@ export class AfterglowFxEngine {
 
     // Subtitle: 破壊殺・終式
     g.font = `700 ${subSize}px "Noto Serif TC", "Yuji Syuku", serif`;
-    g.fillStyle = 'rgba(186, 230, 253, 0.92)';
+    g.fillStyle = 'rgba(186, 230, 253, 0.95)';
     g.shadowColor = 'rgba(14, 165, 233, 0.95)';
-    g.shadowBlur = 12;
+    g.shadowBlur = 14;
     g.fillText('破 壊 殺 ・ 終 式', 0, -bucket * 0.62);
 
-    // Main Title: 青銀亂殘光 (baked with crisp azure bloom once!)
+    // Main Title: 青銀亂殘光
     g.font = `900 ${bucket}px "Yuji Syuku", "Noto Serif TC", serif`;
     g.shadowColor = 'rgba(56, 189, 248, 1)';
-    g.shadowBlur = 26;
-    g.lineWidth = Math.max(3, bucket * 0.09);
-    g.strokeStyle = 'rgba(12, 74, 110, 0.95)';
+    g.shadowBlur = 28;
+    g.lineWidth = Math.max(3.2, bucket * 0.095);
+    g.strokeStyle = 'rgba(6, 8, 28, 0.95)';
     g.strokeText('青銀亂殘光', 0, 0);
 
     const textGrad = g.createLinearGradient(0, -bucket * 0.5, 0, bucket * 0.5);
@@ -904,14 +1060,12 @@ export class AfterglowFxEngine {
     // English subtitle
     g.shadowBlur = 8;
     g.font = `600 ${Math.max(10, Math.round(subSize * 0.72))}px "Inter", sans-serif`;
-    g.fillStyle = 'rgba(224, 242, 254, 0.78)';
-    g.fillText('BLUE SILVER CHAOTIC AFTERGLOW', 0, bucket * 0.86);
+    g.fillStyle = 'rgba(224, 242, 254, 0.82)';
+    g.fillText('BLUE SILVER CHAOTIC AFTERGLOW', 0, bucket * 0.88);
     g.restore();
 
-    if (this.bannerFontReady || bucket > 0) {
-      this.bannerSprite = canvas;
-      this.bannerMainSize = bucket;
-    }
+    this.bannerSprite = canvas;
+    this.bannerBucket = bucket;
     return canvas;
   }
 
@@ -933,28 +1087,191 @@ export class AfterglowFxEngine {
     if (!sprite) return;
 
     ctx.save();
-    const scale = 1 + (1 - ease) * 0.18;
+    const scale = 1 + (1 - ease) * 0.16;
     ctx.translate(cx, topY);
     ctx.scale(scale, scale);
     ctx.globalAlpha = alpha;
     ctx.drawImage(sprite, -sprite.width * 0.5, -sprite.height * 0.5);
 
-    // Animated horizontal luminous brush slash underline
+    // Animated frost-silver ink underline
     ctx.globalCompositeOperation = 'lighter';
-    const lineHalfW = mainSize * 3.1 * ease;
+    const lineHalfW = mainSize * 3.2 * ease;
     const lineGrad = ctx.createLinearGradient(-lineHalfW, 0, lineHalfW, 0);
     lineGrad.addColorStop(0, 'rgba(56, 189, 248, 0)');
-    lineGrad.addColorStop(0.25, 'rgba(56, 189, 248, 0.72)');
-    lineGrad.addColorStop(0.5, 'rgba(248, 250, 252, 0.96)');
-    lineGrad.addColorStop(0.75, 'rgba(56, 189, 248, 0.72)');
+    lineGrad.addColorStop(0.25, 'rgba(56, 189, 248, 0.75)');
+    lineGrad.addColorStop(0.5, 'rgba(248, 250, 252, 0.98)');
+    lineGrad.addColorStop(0.75, 'rgba(56, 189, 248, 0.75)');
     lineGrad.addColorStop(1, 'rgba(56, 189, 248, 0)');
     ctx.strokeStyle = lineGrad;
     ctx.lineWidth = 2.4;
     ctx.beginPath();
-    ctx.moveTo(-lineHalfW, mainSize * 0.56);
-    ctx.lineTo(lineHalfW, mainSize * 0.56);
+    ctx.moveTo(-lineHalfW, mainSize * 0.58);
+    ctx.lineTo(lineHalfW, mainSize * 0.58);
     ctx.stroke();
 
     ctx.restore();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Spawners & Physics Simulation
+  // ---------------------------------------------------------------------------
+  private spawnActivationBlast(center: Vec2, floor: Vec2, minDim: number): void {
+    this.rings.push({
+      x: floor.x,
+      y: floor.y,
+      radius: 18,
+      maxRadius: minDim * 0.68,
+      age: 0,
+      life: 0.65,
+      lineWidth: 5.5,
+      tiltY: 0.28,
+      color: 'rgb(56, 189, 248)',
+    });
+    this.rings.push({
+      x: center.x,
+      y: center.y,
+      radius: 14,
+      maxRadius: minDim * 0.58,
+      age: 0,
+      life: 0.48,
+      lineWidth: 4.8,
+      tiltY: 1,
+      color: 'rgb(124, 58, 237)',
+    });
+
+    for (let i = 0; i < 22; i++) {
+      this.spawnChaoticNeedle(minDim * 1.5, minDim * 1.5, center, minDim);
+    }
+    this.spawnKoyukiStarburst(center.x, center.y, minDim * 0.42, 38);
+  }
+
+  private spawnPunchShockwave(leadWrist: Vec2, _center: Vec2, minDim: number): void {
+    this.rings.push({
+      x: leadWrist.x,
+      y: leadWrist.y,
+      radius: 10,
+      maxRadius: minDim * 0.36,
+      age: 0,
+      life: 0.36,
+      lineWidth: 4.2,
+      tiltY: 1,
+      color: 'rgb(0, 240, 255)',
+    });
+    this.spawnKoyukiStarburst(leadWrist.x, leadWrist.y, minDim * 0.26, 18);
+    for (let i = 0; i < 8; i++) {
+      this.spawnChaoticNeedle(minDim * 1.5, minDim * 1.5, leadWrist, minDim);
+    }
+  }
+
+  private spawnChaoticNeedle(width: number, height: number, center: Vec2, minDim: number): void {
+    const isRadial = Math.random() < 0.62;
+    let x0: number, y0: number, x1: number, y1: number;
+
+    if (isRadial) {
+      const angle = Math.random() * Math.PI * 2;
+      const startDist = minDim * (0.04 + Math.random() * 0.18);
+      const len = minDim * (0.32 + Math.random() * 0.55);
+      x0 = center.x + Math.cos(angle) * startDist;
+      y0 = center.y + Math.sin(angle) * startDist;
+      x1 = center.x + Math.cos(angle) * (startDist + len);
+      y1 = center.y + Math.sin(angle) * (startDist + len);
+    } else {
+      const mx = width * (0.08 + Math.random() * 0.84);
+      const my = height * (0.10 + Math.random() * 0.78);
+      const angle = Math.random() * Math.PI * 2;
+      const halfLen = minDim * (0.16 + Math.random() * 0.32);
+      x0 = mx - Math.cos(angle) * halfLen;
+      y0 = my - Math.sin(angle) * halfLen;
+      x1 = mx + Math.cos(angle) * halfLen;
+      y1 = my + Math.sin(angle) * halfLen;
+    }
+
+    const len = Math.hypot(x1 - x0, y1 - y0);
+    const angle = Math.atan2(y1 - y0, x1 - x0);
+
+    const r = Math.random();
+    const palette: ChaoticNeedle['palette'] =
+      r < 0.48 ? 'cyan' : r < 0.78 ? 'silver' : r < 0.95 ? 'violet' : 'crimson';
+
+    this.needles.push({
+      x0,
+      y0,
+      x1,
+      y1,
+      len,
+      angle,
+      age: 0,
+      life: 0.16 + Math.random() * 0.22,
+      thickness: 1.6 + Math.random() * 3.6,
+      palette,
+      isHero: Math.random() < 0.35,
+    });
+  }
+
+  private spawnKoyukiStarburst(x: number, y: number, speedScale: number, count: number): void {
+    for (let i = 0; i < count; i++) {
+      const a = (i / count) * Math.PI * 2 + (Math.random() - 0.5) * 0.22;
+      const speed = speedScale * (1.3 + Math.random() * 2.0);
+      const col = i % 3 === 0 ? '#f8fafc' : i % 3 === 1 ? '#e9d5ff' : '#38bdf8';
+      this.particles.push({
+        x,
+        y,
+        vx: Math.cos(a) * speed,
+        vy: Math.sin(a) * speed,
+        size: 2.2 + Math.random() * 3.2,
+        age: 0,
+        life: 0.42 + Math.random() * 0.38,
+        twinklePhase: Math.random() * Math.PI * 2,
+        kind: 'firework',
+        color: col,
+      });
+    }
+  }
+
+  private updateParticles(dt: number): void {
+    // Needles
+    for (let i = this.needles.length - 1; i >= 0; i--) {
+      this.needles[i].age += dt;
+      if (this.needles[i].age >= this.needles[i].life) {
+        swapRemove(this.needles, i);
+      }
+    }
+
+    // Rings
+    for (let i = this.rings.length - 1; i >= 0; i--) {
+      const r = this.rings[i];
+      r.age += dt;
+      const t = Math.min(1, r.age / r.life);
+      r.radius = r.maxRadius * (1 - Math.pow(1 - t, 3));
+      if (r.age >= r.life) {
+        swapRemove(this.rings, i);
+      }
+    }
+
+    // Koyuki particles with exponential drag deceleration (v *= exp(-4.8 * dt))
+    const drag = Math.exp(-4.8 * dt);
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const p = this.particles[i];
+      p.age += dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+
+      if (p.kind === 'firework') {
+        p.vx *= drag;
+        p.vy *= drag;
+        p.vy += 35 * dt; // Subtle gravity
+      } else if (p.kind === 'ember') {
+        p.vy -= 15 * dt; // Buoyancy
+      }
+
+      if (p.age >= p.life) {
+        swapRemove(this.particles, i);
+      }
+    }
+
+    // Strict pool upper limits for locked 60fps & < 3.0ms render time
+    if (this.needles.length > 95) this.needles.length = 95;
+    if (this.particles.length > 220) this.particles.length = 220;
+    if (this.rings.length > 20) this.rings.length = 20;
   }
 }

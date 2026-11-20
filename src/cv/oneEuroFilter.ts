@@ -1,3 +1,5 @@
+import type { Landmark, NormalizedLandmark } from '@mediapipe/tasks-vision';
+
 /**
  * One-Euro Filter (Casiez, Roussel, Vogel — CHI 2012)
  *
@@ -102,15 +104,18 @@ export interface Landmark3D {
 
 /**
  * Maintains independent One-Euro filters for all 33 MediaPipe Pose landmarks (x, y, z)
- * using a pre-allocated output buffer to avoid per-frame GC allocations.
+ * using pre-allocated output buffers to avoid per-frame GC allocations.
  */
 export class PoseLandmarkSmoother {
   private readonly filters: Array<[OneEuroScalarFilter, OneEuroScalarFilter, OneEuroScalarFilter]>;
   private readonly buffer: Landmark3D[];
+  private readonly worldFilters: Array<[OneEuroScalarFilter, OneEuroScalarFilter, OneEuroScalarFilter]>;
+  private readonly worldBuffer: Landmark[];
 
   constructor(
     landmarkCount = 33,
-    config: OneEuroConfig = { minCutoff: 1.8, beta: 0.04, dCutoff: 1.0 },
+    config: OneEuroConfig = { minCutoff: 0.85, beta: 3.2, dCutoff: 1.0 },
+    worldConfig: OneEuroConfig = { minCutoff: 1.0, beta: 2.5, dCutoff: 1.0 },
   ) {
     this.filters = Array.from({ length: landmarkCount }, () => [
       new OneEuroScalarFilter(config),
@@ -123,9 +128,20 @@ export class PoseLandmarkSmoother {
       z: 0,
       visibility: 0,
     }));
+    this.worldFilters = Array.from({ length: landmarkCount }, () => [
+      new OneEuroScalarFilter(worldConfig),
+      new OneEuroScalarFilter(worldConfig),
+      new OneEuroScalarFilter(worldConfig),
+    ]);
+    this.worldBuffer = Array.from({ length: landmarkCount }, () => ({
+      x: 0,
+      y: 0,
+      z: 0,
+      visibility: 0,
+    }));
   }
 
-  smooth(landmarks: Landmark3D[], timestampMs: number): Landmark3D[] {
+  smooth(landmarks: NormalizedLandmark[] | Landmark3D[], timestampMs: number): Landmark3D[] {
     const tSec = timestampMs / 1000;
     const count = Math.min(landmarks.length, this.filters.length);
     for (let i = 0; i < count; i++) {
@@ -140,8 +156,28 @@ export class PoseLandmarkSmoother {
     return this.buffer;
   }
 
+  smoothWorld(worldLandmarks: Landmark[], timestampMs: number): Landmark[] {
+    const tSec = timestampMs / 1000;
+    const count = Math.min(worldLandmarks.length, this.worldFilters.length);
+    for (let i = 0; i < count; i++) {
+      const lm = worldLandmarks[i];
+      const [fx, fy, fz] = this.worldFilters[i];
+      const out = this.worldBuffer[i];
+      out.x = fx.filter(lm.x, tSec);
+      out.y = fy.filter(lm.y, tSec);
+      out.z = fz.filter(lm.z, tSec);
+      out.visibility = lm.visibility;
+    }
+    return this.worldBuffer;
+  }
+
   reset(): void {
     for (const [fx, fy, fz] of this.filters) {
+      fx.reset();
+      fy.reset();
+      fz.reset();
+    }
+    for (const [fx, fy, fz] of this.worldFilters) {
       fx.reset();
       fy.reset();
       fz.reset();

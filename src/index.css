@@ -1,5 +1,18 @@
 @import "tailwindcss";
 
+:root {
+  --obsidian: #030509;
+  --obsidian-surface: #070b14;
+  --obsidian-card: rgba(3, 6, 17, 0.9);
+  --hairline: rgba(255, 255, 255, 0.08);
+  --hairline-bright: rgba(255, 255, 255, 0.16);
+  --hairline-ice: rgba(56, 189, 248, 0.32);
+  --ice-cyan: #38bdf8;
+  --ice-cyan-bright: #7dd3fc;
+  --ice-cyan-glow: rgba(56, 189, 248, 0.24);
+  --ease-editorial: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
 @layer base {
   html,
   body,
@@ -9,11 +22,34 @@
     margin: 0;
     padding: 0;
     overflow: hidden;
-    background-color: #05070f;
+    background-color: var(--obsidian);
+    color: #f8fafc;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   }
 }
 
 .font-calligraphy {
   font-family: 'Yuji Syuku', 'Noto Serif TC', serif;
+}
+
+/* Subtle SVG film-grain utility — prevents 8-bit gradient quantization & banding */
+.bg-film-grain {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.035'/%3E%3C/svg%3E");
+}
+
+.ease-editorial {
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes spin-slow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin-slow {
+  animation: spin-slow 120s linear infinite;
 }

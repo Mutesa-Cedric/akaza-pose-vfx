@@ -10,10 +10,12 @@ export interface VideoViewportRect {
 }
 
 /**
- * Renders an engineer-facing CV telemetry overlay directly onto the stage canvas:
- *  - Raw MediaPipe landmarks (subtle magenta dots) vs. One-Euro smoothed skeleton (cyan)
- *  - Lead & rear fist tracking highlights
- *  - Floor Compass anchor reticle
+ * Sony CineAlta monochrome + pure ice-cyan CV telemetry skeleton overlay:
+ *  - Thin 1.5px #94a3b8 slate bones
+ *  - Crisp #38bdf8 active joints
+ *  - Minimalist #38bdf8 / #a78bfa lead & rear fist reticles
+ *  - Razor floor anchor reticle
+ *  - Zero visual clutter
  */
 export function drawDebugSkeleton(
   ctx: CanvasRenderingContext2D,
@@ -30,31 +32,26 @@ export function drawDebugSkeleton(
 
   ctx.save();
 
-  // 1. Raw landmarks (faint rose dots to visually contrast against One-Euro smoothed joints)
+  // 1. Raw landmarks (ultra-faint hairline dots for CV jitter reference)
   if (raw && raw.length >= 29) {
-    ctx.fillStyle = 'rgba(244, 114, 182, 0.55)';
+    ctx.fillStyle = 'rgba(244, 114, 182, 0.28)';
     for (let i = 11; i < 29; i++) {
       const lm = raw[i];
       if (!lm || (lm.visibility ?? 1) < 0.25) continue;
       const p = toScreen(lm.x, lm.y);
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, 1.8, 0, Math.PI * 2);
       ctx.fill();
     }
   }
 
-  // 2. One-Euro smoothed skeleton
+  // 2. Sony CineAlta monochrome bone skeleton with ice-cyan active joints
   if (smoothed && smoothed.length >= 29) {
-    const activeColor =
-      pose.state === 'ACTIVE'
-        ? '#38bdf8'
-        : pose.state === 'CHARGING'
-          ? '#facc15'
-          : '#22d3ee';
-
-    ctx.strokeStyle = activeColor;
-    ctx.lineWidth = 2.2;
+    // Thin 1.5px #94a3b8 bones
+    ctx.strokeStyle = '#94a3b8';
+    ctx.lineWidth = 1.5;
     ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     ctx.beginPath();
     for (const [a, b] of POSE_CONNECTIONS) {
       const la = smoothed[a];
@@ -67,46 +64,51 @@ export function drawDebugSkeleton(
     }
     ctx.stroke();
 
-    // Joint nodes
+    // Crisp #38bdf8 active joints
     for (let i = 11; i < 33; i++) {
       const lm = smoothed[i];
       if (!lm || (lm.visibility ?? 1) < 0.25) continue;
       const p = toScreen(lm.x, lm.y);
       ctx.fillStyle = '#0f172a';
-      ctx.strokeStyle = activeColor;
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, 3.2, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     }
 
-    // Highlight lead & rear fists
-    const drawMarker = (nx: number, ny: number, label: string, color: string) => {
+    // Lead & Rear fist reticles
+    const drawFistMarker = (nx: number, ny: number, label: string, color: string) => {
       const p = toScreen(nx, ny);
       ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 1.4;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 11, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, 9, 0, Math.PI * 2);
       ctx.stroke();
 
-      ctx.font = '600 10px "JetBrains Mono", monospace';
       ctx.fillStyle = color;
-      ctx.fillText(label, p.x + 14, p.y + 3);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.font = '600 9px "JetBrains Mono", monospace';
+      ctx.fillStyle = color;
+      ctx.fillText(label, p.x + 12, p.y + 3);
     };
 
-    drawMarker(pose.leadWrist.x, pose.leadWrist.y, 'LEAD', '#38bdf8');
-    drawMarker(pose.rearWrist.x, pose.rearWrist.y, 'REAR', '#a78bfa');
+    drawFistMarker(pose.leadWrist.x, pose.leadWrist.y, 'LEAD', '#38bdf8');
+    drawFistMarker(pose.rearWrist.x, pose.rearWrist.y, 'REAR', '#a78bfa');
 
-    // Stance width vector between ankles
+    // Stance base vector between ankles
     const lAnk = smoothed[POSE_IDX.LEFT_ANKLE];
     const rAnk = smoothed[POSE_IDX.RIGHT_ANKLE];
     if (lAnk && rAnk && (lAnk.visibility ?? 1) > 0.3 && (rAnk.visibility ?? 1) > 0.3) {
       const pa = toScreen(lAnk.x, lAnk.y);
       const pb = toScreen(rAnk.x, rAnk.y);
-      ctx.setLineDash([5, 4]);
-      ctx.strokeStyle = 'rgba(250, 204, 21, 0.8)';
-      ctx.lineWidth = 1.6;
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.45)';
+      ctx.lineWidth = 1.2;
       ctx.beginPath();
       ctx.moveTo(pa.x, pa.y);
       ctx.lineTo(pb.x, pb.y);
@@ -115,20 +117,32 @@ export function drawDebugSkeleton(
     }
   }
 
-  // 3. Floor compass anchor reticle
+  // 3. Crisp Floor Compass anchor reticle
   if (pose.hasPerson) {
     const fp = toScreen(pose.floorAnchor.x, pose.floorAnchor.y);
+
+    // Crosshairs
     ctx.strokeStyle = '#f8fafc';
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.moveTo(fp.x - 10, fp.y);
-    ctx.lineTo(fp.x + 10, fp.y);
-    ctx.moveTo(fp.x, fp.y - 10);
-    ctx.lineTo(fp.x, fp.y + 10);
+    ctx.moveTo(fp.x - 8, fp.y);
+    ctx.lineTo(fp.x + 8, fp.y);
+    ctx.moveTo(fp.x, fp.y - 8);
+    ctx.lineTo(fp.x, fp.y + 8);
     ctx.stroke();
-    ctx.font = '600 10px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#e2e8f0';
-    ctx.fillText('COMPASS ANCHOR', fp.x + 12, fp.y + 4);
+
+    // Floor targeting tick ring
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.ellipse(fp.x, fp.y, 14, 5, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.font = '600 9px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillText('ANCHOR', fp.x + 12, fp.y + 3);
   }
 
   ctx.restore();
