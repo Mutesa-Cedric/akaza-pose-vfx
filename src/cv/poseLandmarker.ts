@@ -1,0 +1,103 @@
+import { FilesetResolver, PoseLandmarker, type PoseLandmarkerResult } from '@mediapipe/tasks-vision';
+
+export type InferenceDelegate = 'GPU' | 'CPU';
+
+export interface PoseEngineInfo {
+  delegate: InferenceDelegate;
+  modelName: string;
+}
+
+const WASM_CDN =
+  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm';
+
+const POSE_MODEL_URL =
+  'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+
+/**
+ * MediaPipe BlazePose 33-landmark indices used by our Akaza pose classifier & FX engine.
+ */
+export const POSE_IDX = {
+  NOSE: 0,
+  LEFT_SHOULDER: 11,
+  RIGHT_SHOULDER: 12,
+  LEFT_ELBOW: 13,
+  RIGHT_ELBOW: 14,
+  LEFT_WRIST: 15,
+  RIGHT_WRIST: 16,
+  LEFT_PINKY: 17,
+  RIGHT_PINKY: 18,
+  LEFT_INDEX: 19,
+  RIGHT_INDEX: 20,
+  LEFT_HIP: 23,
+  RIGHT_HIP: 24,
+  LEFT_KNEE: 25,
+  RIGHT_KNEE: 26,
+  LEFT_ANKLE: 27,
+  RIGHT_ANKLE: 28,
+  LEFT_HEEL: 29,
+  RIGHT_HEEL: 30,
+  LEFT_FOOT_INDEX: 31,
+  RIGHT_FOOT_INDEX: 32,
+} as const;
+
+export const POSE_CONNECTIONS: ReadonlyArray<[number, number]> = [
+  [11, 12],
+  [11, 13],
+  [13, 15],
+  [12, 14],
+  [14, 16],
+  [11, 23],
+  [12, 24],
+  [23, 24],
+  [23, 25],
+  [25, 27],
+  [24, 26],
+  [26, 28],
+  [27, 29],
+  [29, 31],
+  [28, 30],
+  [30, 32],
+];
+
+/**
+ * Loads MediaPipe PoseLandmarker in VIDEO mode with GPU delegate first, falling back
+ * gracefully to CPU/WASM if WebGL/GPU initialization fails on the user's browser.
+ */
+export async function createPoseEngine(): Promise<{
+  landmarker: PoseLandmarker;
+  info: PoseEngineInfo;
+}> {
+  const vision = await FilesetResolver.forVisionTasks(WASM_CDN);
+
+  const tryCreate = async (delegate: InferenceDelegate) => {
+    return PoseLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: POSE_MODEL_URL,
+        delegate,
+      },
+      runningMode: 'VIDEO',
+      numPoses: 1,
+      minPoseDetectionConfidence: 0.45,
+      minPosePresenceConfidence: 0.45,
+      minTrackingConfidence: 0.45,
+      outputSegmentationMasks: false,
+    });
+  };
+
+  try {
+    const landmarker = await tryCreate('GPU');
+    return {
+      landmarker,
+      info: { delegate: 'GPU', modelName: 'BlazePose Lite (FP16)' },
+    };
+  } catch (gpuError) {
+    console.warn('[PoseEngine] GPU delegate unavailable, falling back to CPU:', gpuError);
+    const landmarker = await tryCreate('CPU');
+    return {
+      landmarker,
+      info: { delegate: 'CPU', modelName: 'BlazePose Lite (FP16)' },
+    };
+  }
+}
+
+export type { PoseLandmarker, PoseLandmarkerResult };
