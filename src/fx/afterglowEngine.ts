@@ -13,6 +13,22 @@ export interface AfterglowFrameHooks {
   onDissipate?: () => void;
 }
 
+export interface AfterglowFxOptions {
+  depthMatte: boolean;
+  echoes: boolean;
+  compass: boolean;
+  strikes: boolean;
+  intensityScale: number;
+}
+
+export const DEFAULT_FX_OPTIONS: AfterglowFxOptions = {
+  depthMatte: true,
+  echoes: true,
+  compass: true,
+  strikes: true,
+  intensityScale: 1,
+};
+
 interface ChaoticNeedle {
   x0: number;
   y0: number;
@@ -407,8 +423,11 @@ export class AfterglowFxEngine {
     hooks?: AfterglowFrameHooks,
     rear?: CanvasRenderingContext2D,
     hasMatte = false,
+    options: AfterglowFxOptions = DEFAULT_FX_OPTIONS,
   ): void {
     const dt = Math.min(0.05, Math.max(0.001, dtSec));
+    const intensityScale = Math.max(0.4, Math.min(1.4, options.intensityScale));
+    const useEchoes = options.echoes && options.depthMatte && hasMatte;
     this.timeSec += dt;
     this.punchCooldown = Math.max(0, this.punchCooldown - dt);
     this.strikeCooldown = Math.max(0, this.strikeCooldown - dt);
@@ -459,11 +478,13 @@ export class AfterglowFxEngine {
     }
     if (this.prevState !== 'ACTIVE' && pose.state === 'ACTIVE') {
       this.resetEchoes();
-      this.impactBeatFrames = 2;
-      this.impactFlashAlpha = 0.85;
-      this.shakeMagnitude = 12.0;
-      this.startShock(centerPx, width, height, 1);
-      this.spawnActivationBlast(centerPx, floorPx, minDim);
+      this.impactBeatFrames = options.strikes ? 2 : 0;
+      this.impactFlashAlpha = 0.85 * intensityScale;
+      this.shakeMagnitude = 12.0 * intensityScale;
+      this.startShock(centerPx, width, height, Math.min(1.25, intensityScale));
+      if (options.strikes) {
+        this.spawnActivationBlast(centerPx, floorPx, minDim);
+      }
       hooks?.onActivate?.();
     } else if (this.prevState === 'ACTIVE' && pose.state === 'DISSIPATING') {
       hooks?.onDissipate?.();
@@ -471,11 +492,11 @@ export class AfterglowFxEngine {
     this.prevState = pose.state;
 
     // Reactive punch burst
-    if (pose.state === 'ACTIVE' && pose.wristSpeed > 1.35 && this.punchCooldown <= 0) {
+    if (options.strikes && pose.state === 'ACTIVE' && pose.wristSpeed > 1.35 && this.punchCooldown <= 0) {
       this.punchCooldown = 0.22;
       this.impactBeatFrames = 2;
-      this.shakeMagnitude = Math.max(this.shakeMagnitude, 6.0);
-      this.startShock(leadWristPx, width, height, 0.65);
+      this.shakeMagnitude = Math.max(this.shakeMagnitude, 6.0 * intensityScale);
+      this.startShock(leadWristPx, width, height, 0.65 * intensityScale);
       this.spawnPunchShockwave(leadWristPx, centerPx, minDim);
       hooks?.onPunchBurst?.(2 * leadWristPx.x / width - 1, Math.min(1, pose.wristSpeed / 2.5));
     }
@@ -483,8 +504,8 @@ export class AfterglowFxEngine {
     // -------------------------------------------------------------------------
     // Continuous Spawning
     // -------------------------------------------------------------------------
-    if (pose.state === 'CHARGING') {
-      if (Math.random() < 0.8) {
+    if (options.strikes && pose.state === 'CHARGING') {
+      if (Math.random() < 0.8 * intensityScale) {
         const a = Math.random() * Math.PI * 2;
         const dist = minDim * (0.2 + Math.random() * 0.25);
         this.particles.push({
@@ -504,57 +525,65 @@ export class AfterglowFxEngine {
 
     if (pose.state === 'ACTIVE') {
       const escalation = Math.min(1, 0.45 + pose.activeDurationSec * 0.4);
-      if (rear && hasMatte) this.revealEchoes(dt, centerPx.x / width, hooks);
+      if (rear && useEchoes) {
+        this.revealEchoes(dt, centerPx.x / width, hooks);
+      } else {
+        this.scene.echoReveals.fill(0);
+      }
 
-      // 100-strike chaotic needle barrage
-      const ramp = rear ? Math.min(1, 0.20 + pose.activeDurationSec * 2.4) : 1;
-      this.needleSpawnAcc += dt * (22 + escalation * 28) * ramp;
-      while (this.needleSpawnAcc >= 1) {
-        this.needleSpawnAcc -= 1;
-        const strike = this.spawnChaoticNeedle(width, height, centerPx, minDim);
-        if (strike.isHero && !strike.behind && this.strikeCooldown <= 0 && pose.activeDurationSec > 0.54) {
-          this.strikeCooldown = 0.19;
-          hooks?.onStrike?.(2 * strike.x0 / width - 1, 2 * strike.x1 / width - 1);
+      if (options.strikes) {
+        // 100-strike chaotic needle barrage
+        const ramp = rear ? Math.min(1, 0.20 + pose.activeDurationSec * 2.4) : 1;
+        this.needleSpawnAcc += dt * (22 + escalation * 28) * ramp * intensityScale;
+        while (this.needleSpawnAcc >= 1) {
+          this.needleSpawnAcc -= 1;
+          const strike = this.spawnChaoticNeedle(width, height, centerPx, minDim);
+          if (strike.isHero && !strike.behind && this.strikeCooldown <= 0 && pose.activeDurationSec > 0.54) {
+            this.strikeCooldown = 0.19;
+            hooks?.onStrike?.(2 * strike.x0 / width - 1, 2 * strike.x1 / width - 1);
+          }
+        }
+
+        // Koyuki firework starbursts
+        this.fireworkSpawnAcc += dt * (1.8 + escalation * 2.4) * intensityScale;
+        if (this.fireworkSpawnAcc >= 1) {
+          this.fireworkSpawnAcc -= 1;
+          const angle = Math.random() * Math.PI * 2;
+          const dist = minDim * (0.26 + Math.random() * 0.26);
+          const fx = Math.max(width * 0.08, Math.min(width * 0.92, centerPx.x + Math.cos(angle) * dist * 1.3));
+          const fy = Math.max(height * 0.12, Math.min(height * 0.82, centerPx.y + Math.sin(angle) * dist * 0.85));
+          this.spawnKoyukiStarburst(fx, fy, minDim * 0.24, Math.max(8, Math.round(18 * intensityScale)));
+        }
+
+        // Rising icy floor embers & wrist micro-sparks
+        const emberCount = Math.max(1, Math.round(3 * intensityScale));
+        for (let i = 0; i < emberCount; i++) {
+          const fromFloor = i < Math.ceil(emberCount * 0.65);
+          const angle = Math.random() * Math.PI * 2;
+          const rSpread = minDim * (0.12 + Math.random() * 0.28);
+          const sx = fromFloor
+            ? floorPx.x + Math.cos(angle) * rSpread
+            : (Math.random() < 0.5 ? leadWristPx.x : rearWristPx.x) + (Math.random() - 0.5) * 28;
+          const sy = fromFloor
+            ? floorPx.y + Math.sin(angle) * rSpread * 0.28
+            : (Math.random() < 0.5 ? leadWristPx.y : rearWristPx.y) + (Math.random() - 0.5) * 28;
+
+          this.particles.push({
+            x: sx,
+            y: sy,
+            vx: (Math.random() - 0.5) * 40,
+            vy: -(60 + Math.random() * 120),
+            size: 2 + Math.random() * 3.5,
+            age: 0,
+            life: 0.65 + Math.random() * 0.65,
+            twinklePhase: Math.random() * Math.PI * 2,
+            kind: Math.random() < 0.45 ? 'glint' : 'ember',
+            color: Math.random() < 0.5 ? '#f8fafc' : '#38bdf8',
+          });
         }
       }
-
-      // Koyuki firework starbursts
-      this.fireworkSpawnAcc += dt * (1.8 + escalation * 2.4);
-      if (this.fireworkSpawnAcc >= 1) {
-        this.fireworkSpawnAcc -= 1;
-        const angle = Math.random() * Math.PI * 2;
-        const dist = minDim * (0.26 + Math.random() * 0.26);
-        const fx = Math.max(width * 0.08, Math.min(width * 0.92, centerPx.x + Math.cos(angle) * dist * 1.3));
-        const fy = Math.max(height * 0.12, Math.min(height * 0.82, centerPx.y + Math.sin(angle) * dist * 0.85));
-        this.spawnKoyukiStarburst(fx, fy, minDim * 0.24, 18);
-      }
-
-      // Rising icy floor embers & wrist micro-sparks
-      for (let i = 0; i < 3; i++) {
-        const fromFloor = i < 2;
-        const angle = Math.random() * Math.PI * 2;
-        const rSpread = minDim * (0.12 + Math.random() * 0.28);
-        const sx = fromFloor
-          ? floorPx.x + Math.cos(angle) * rSpread
-          : (Math.random() < 0.5 ? leadWristPx.x : rearWristPx.x) + (Math.random() - 0.5) * 28;
-        const sy = fromFloor
-          ? floorPx.y + Math.sin(angle) * rSpread * 0.28
-          : (Math.random() < 0.5 ? leadWristPx.y : rearWristPx.y) + (Math.random() - 0.5) * 28;
-
-        this.particles.push({
-          x: sx,
-          y: sy,
-          vx: (Math.random() - 0.5) * 40,
-          vy: -(60 + Math.random() * 120),
-          size: 2 + Math.random() * 3.5,
-          age: 0,
-          life: 0.65 + Math.random() * 0.65,
-          twinklePhase: Math.random() * Math.PI * 2,
-          kind: Math.random() < 0.45 ? 'glint' : 'ember',
-          color: Math.random() < 0.5 ? '#f8fafc' : '#38bdf8',
-        });
-      }
-
+    } else if (!useEchoes) {
+      this.scene.echoReveals.fill(0);
     }
 
     // Decay impact & shake
@@ -569,8 +598,8 @@ export class AfterglowFxEngine {
     // -------------------------------------------------------------------------
     ctx.clearRect(0, 0, width, height);
     rear?.clearRect(0, 0, width, height);
-    const intensity = pose.effectIntensity;
-    this.scene.intensity = intensity;
+    const intensity = Math.min(1.25, pose.effectIntensity * intensityScale);
+    this.scene.intensity = Math.min(1, intensity);
 
     if (
       intensity <= 0.005 &&
@@ -583,14 +612,14 @@ export class AfterglowFxEngine {
     }
 
     // Stack Layer 1: 2-Frame Anime Impact Beat (Rim split)
-    if (this.impactBeatFrames > 0) {
+    if (options.strikes && this.impactBeatFrames > 0) {
       this.drawImpactBeat(ctx, width, height);
       this.impactBeatFrames--;
     }
 
     // Stack Layer 2: Midnight Indigo Domain Grade & Vignette
     if (!rear && intensity > 0.01) {
-      this.drawDomainGrade(ctx, width, height, centerPx, intensity);
+      this.drawDomainGrade(ctx, width, height, centerPx, Math.min(1, intensity));
     }
 
     // Stack Layer 3: 3D Floor Snowflake Compass (破壊殺・羅針)
@@ -600,9 +629,11 @@ export class AfterglowFxEngine {
         ? pose.chargeProgress * 0.45
         : pose.state === 'ACTIVE'
           ? Math.min(1, 0.35 + pose.activeDurationSec * 2.8)
-          : intensity;
+          : pose.effectIntensity;
 
-    const compassOpacity = Math.max(intensity, pose.state === 'CHARGING' ? pose.chargeProgress * 0.42 : 0);
+    const compassOpacity = options.compass
+      ? Math.min(1.25, Math.max(intensity, pose.state === 'CHARGING' ? pose.chargeProgress * 0.42 * intensityScale : 0))
+      : 0;
     if (rear) {
       const scene = this.scene;
       scene.time = this.timeSec;
@@ -613,48 +644,52 @@ export class AfterglowFxEngine {
       const open = pose.state === 'DISSIPATING' ? 1 : unfold;
       scene.compassRadius = compassRadius / minDim * (0.18 + open * 0.82);
       scene.compassOpacity = compassOpacity * (0.90 + 0.10 * Math.sin(this.timeSec * 5.2));
-      this.drawPlasmaRings(rear, true);
-      this.drawChaoticNeedles(rear, true);
-    } else {
+      if (options.strikes) {
+        this.drawPlasmaRings(rear, true);
+        this.drawChaoticNeedles(rear, true);
+      }
+    } else if (options.compass) {
       drawSnowflakeCompass({
         ctx,
         cx: floorPx.x,
         cy: floorPx.y,
         radius: compassRadius,
         unfold,
-        intensity: compassOpacity,
+        intensity: Math.min(1, compassOpacity),
         timeSec: this.timeSec,
         activeTime: pose.activeDurationSec,
       });
     }
 
     // Stack Layer 4: Face-Safe Volumetric Aura Wisps (strictly below collarbone)
-    if (!rear && intensity > 0.04 && pose.hasPerson) {
-      this.drawFaceSafeAuraWisps(ctx, landmarks, centerPx, minDim, intensity, mapY, mirrored, width);
+    if (!rear && options.strikes && intensity > 0.04 && pose.hasPerson) {
+      this.drawFaceSafeAuraWisps(ctx, landmarks, centerPx, minDim, Math.min(1, intensity), mapY, mirrored, width);
     }
 
     // Stack Layer 5: Fist Plasma Vortices & Directional Shockwaves
-    if (intensity > 0.05 && pose.hasPerson) {
-      this.drawFistVortices(ctx, leadWristPx, rearWristPx, minDim, intensity, pose.wristSpeed);
+    if (options.strikes && intensity > 0.05 && pose.hasPerson) {
+      this.drawFistVortices(ctx, leadWristPx, rearWristPx, minDim, Math.min(1, intensity), pose.wristSpeed);
     }
 
     // Stack Layer 6: Plasma Rings & 100-Strike Razor-Needle Chaotic Barrage
-    this.drawPlasmaRings(ctx, rear ? false : undefined);
-    this.drawChaoticNeedles(ctx, rear ? false : undefined);
+    if (options.strikes) {
+      this.drawPlasmaRings(ctx, rear ? false : undefined);
+      this.drawChaoticNeedles(ctx, rear ? false : undefined);
 
-    // Stack Layer 7: Koyuki Firework Starbursts & Embers
-    this.drawKoyukiParticles(ctx);
+      // Stack Layer 7: Koyuki Firework Starbursts & Embers
+      this.drawKoyukiParticles(ctx);
 
-    // Stack Layer 8: Peripheral Kinetic Speed Lines & Calligraphy Banner
-    if (intensity > 0.22) {
-      this.drawSpeedLines(ctx, width, height, centerPx, intensity);
+      // Stack Layer 8: Peripheral Kinetic Speed Lines
+      if (intensity > 0.22) {
+        this.drawSpeedLines(ctx, width, height, centerPx, Math.min(1, intensity));
+      }
     }
 
     // Subtle Flash Overlay on Beat
-    if (!rear && this.impactFlashAlpha > 0.02) {
+    if (!rear && options.strikes && this.impactFlashAlpha > 0.02) {
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      ctx.fillStyle = `rgba(240, 249, 255, ${this.impactFlashAlpha * 0.5})`;
+      ctx.fillStyle = `rgba(240, 249, 255, ${Math.min(1, this.impactFlashAlpha) * 0.5})`;
       ctx.fillRect(0, 0, width, height);
       ctx.restore();
     }
@@ -664,7 +699,7 @@ export class AfterglowFxEngine {
     // Calligraphy Banner ("破壊殺・終式 青銀亂殘光")
     const titleFade = rear ? Math.max(0, Math.min(1, (1.95 - pose.activeDurationSec) / 0.62)) : 1;
     if (intensity * titleFade > 0.08 && pose.state !== 'CHARGING') {
-      this.drawCalligraphyBanner(ctx, width, height, intensity * titleFade, pose.activeDurationSec);
+      this.drawCalligraphyBanner(ctx, width, height, Math.min(1, intensity) * titleFade, pose.activeDurationSec);
     }
   }
 

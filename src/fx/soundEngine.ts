@@ -38,14 +38,26 @@ export class AfterglowSoundEngine {
   private mix: SoundMix | null = null;
   private charge: ChargeVoice | null = null;
   private muted = false;
+  private volume = 0.85;
 
   setMuted(muted: boolean): void {
     this.muted = muted;
     if (muted) this.endCharge();
+    this.syncMasterGain();
+  }
+
+  setVolume(volume: number): void {
+    this.volume = clamp(volume, 0, 1);
+    if (this.volume <= 0.001) this.endCharge();
+    this.syncMasterGain();
+  }
+
+  private syncMasterGain(): void {
     if (!this.ctx || !this.mix) return;
     const gain = this.mix.master.gain;
     const now = this.ctx.currentTime;
-    gain.setTargetAtTime(this.muted ? 0 : MASTER_LEVEL, now, 0.008);
+    const target = this.muted ? 0 : MASTER_LEVEL * this.volume;
+    gain.setTargetAtTime(target, now, 0.012);
   }
 
   /** Call from the camera, video, preview, or sound button gesture. */
@@ -184,7 +196,7 @@ export class AfterglowSoundEngine {
   }
 
   private get playingContext(): AudioContext | null {
-    return !this.muted && this.ctx?.state === 'running' ? this.ctx : null;
+    return !this.muted && this.volume > 0.001 && this.ctx?.state === 'running' ? this.ctx : null;
   }
 
   private startCharge(ctx: AudioContext, noise: AudioBuffer): ChargeVoice {
@@ -221,7 +233,7 @@ export class AfterglowSoundEngine {
     compressor.attack.value = 0.005;
     compressor.release.value = 0.14;
     const master = ctx.createGain();
-    master.gain.value = this.muted ? 0 : MASTER_LEVEL;
+    master.gain.value = this.muted ? 0 : MASTER_LEVEL * this.volume;
     dry.connect(compressor).connect(master).connect(ctx.destination);
 
     // Two short, filtered room taps put tails behind the dry transients in stereo.

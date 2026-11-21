@@ -1,4 +1,4 @@
-import type { PoseEvaluation } from '../cv/akazaPoseClassifier';
+import type { PoseEvaluation, TriggerMode } from '../cv/akazaPoseClassifier';
 import type { PoseEngineInfo } from '../cv/poseLandmarker';
 
 export interface TelemetrySnapshot {
@@ -13,6 +13,8 @@ export interface TelemetrySnapshot {
 
 interface TechHudProps {
   telemetry: TelemetrySnapshot;
+  entryThreshold: number;
+  triggerMode: TriggerMode;
   oneEuroEnabled: boolean;
   onToggleOneEuro: () => void;
 }
@@ -60,7 +62,7 @@ function HairlineMetric({
   );
 }
 
-export function TechHud({ telemetry, oneEuroEnabled, onToggleOneEuro }: TechHudProps) {
+export function TechHud({ telemetry, entryThreshold, triggerMode, oneEuroEnabled, onToggleOneEuro }: TechHudProps) {
   const { fps, inferenceMs, maskMs, fxRenderMs, pose, engineInfo, renderer } = telemetry;
 
   return (
@@ -108,12 +110,12 @@ export function TechHud({ telemetry, oneEuroEnabled, onToggleOneEuro }: TechHudP
         </div>
       </div>
 
-      {/* Combined stance score hairline bar with sharp 62% threshold tick */}
+      {/* Combined stance score hairline bar with sharp dynamic threshold tick */}
       <div className="mt-3 pt-2 border-t border-white/5">
         <HairlineMetric
-          label="STANCE LOCK GATE (62%)"
+          label={`STANCE LOCK GATE (${Math.round(entryThreshold * 100)}%)`}
           value={pose.rawConfidence}
-          threshold={0.62}
+          threshold={entryThreshold}
         />
       </div>
 
@@ -156,6 +158,11 @@ export function TechHud({ telemetry, oneEuroEnabled, onToggleOneEuro }: TechHudP
       <div className="mt-2 flex items-center justify-between text-[9px] font-mono text-slate-500 pt-1">
         <span>{pose.resolvedMode === 'full-body' ? 'FULL BODY' : 'DESK'}</span>
         <span>LEAD: {pose.stanceSide.toUpperCase()}</span>
+        {triggerMode === 'burst' && (
+          <span className="rounded border border-[#38bdf8]/40 bg-[#38bdf8]/10 px-1 text-[#38bdf8]">
+            BURST
+          </span>
+        )}
         <span className="tabular-nums">WRIST V: {pose.wristSpeed.toFixed(2)}</span>
       </div>
     </aside>

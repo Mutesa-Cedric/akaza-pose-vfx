@@ -7,14 +7,17 @@ import {
   HelpCircle,
   Pause,
   Play,
+  SlidersHorizontal,
   Upload,
   Volume2,
   VolumeX,
 } from 'lucide-react';
 import {
   AkazaPoseTracker,
+  DEFAULT_TRACKER_CONFIG,
   type DetectionMode,
   type PoseEvaluation,
+  type TriggerMode,
 } from './cv/akazaPoseClassifier';
 import { PoseLandmarkSmoother, type Landmark3D } from './cv/oneEuroFilter';
 import {
@@ -23,7 +26,12 @@ import {
   type PoseEngineInfo,
   type PoseLandmarker,
 } from './cv/poseLandmarker';
-import { AfterglowFxEngine, type AfterglowFrameHooks } from './fx/afterglowEngine';
+import {
+  AfterglowFxEngine,
+  DEFAULT_FX_OPTIONS,
+  type AfterglowFrameHooks,
+  type AfterglowFxOptions,
+} from './fx/afterglowEngine';
 import { AfterglowCompositor, MAX_COMPOSITE_SIZE } from './fx/afterglowCompositor';
 import {
   drawDebugSkeleton,
@@ -32,6 +40,7 @@ import {
 import { AfterglowSoundEngine } from './fx/soundEngine';
 import { PoseGuideCard } from './components/PoseGuideCard';
 import { TechHud, type TelemetrySnapshot } from './components/TechHud';
+import { ControlsDrawer } from './components/ControlsDrawer';
 
 type MediaSourceKind = 'none' | 'camera' | 'video';
 
@@ -168,9 +177,10 @@ function SnowflakeCompassWatermark() {
 }
 
 /** Razor-thin right-edge vertical Stance Lock hairline meter */
-function StanceLockMeter({ confidence }: { confidence: number }) {
-  const isLocked = confidence >= 0.62;
+function StanceLockMeter({ confidence, threshold = 0.74 }: { confidence: number; threshold?: number }) {
+  const isLocked = confidence >= threshold;
   const pct = Math.min(100, Math.max(0, Math.round(confidence * 100)));
+  const gatePct = Math.min(100, Math.max(0, Math.round(threshold * 100)));
 
   return (
     <div className="pointer-events-none fixed right-3 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center">
@@ -181,7 +191,10 @@ function StanceLockMeter({ confidence }: { confidence: number }) {
           }`}
           style={{ height: `${pct}%` }}
         />
-        <div className="absolute bottom-[62%] -inset-x-0.5 h-[1px] bg-white z-10" />
+        <div
+          className={`absolute -inset-x-0.5 h-[1px] z-10 ${isLocked ? 'bg-[#38bdf8]' : 'bg-white'}`}
+          style={{ bottom: `${gatePct}%` }}
+        />
       </div>
       <div className="mt-2 -rotate-90 origin-center text-[8px] font-mono tracking-widest text-slate-400 select-none whitespace-nowrap">
         {pct}%
@@ -226,8 +239,16 @@ export default function App() {
   const [mode, setMode] = useState<DetectionMode>('auto');
   const [mirrored, setMirrored] = useState(true);
   const [muted, setMuted] = useState(false);
+  const [volume, setVolume] = useState(0.85);
   const [showHud, setShowHud] = useState(false);
   const [showGuide, setShowGuide] = useState(true);
+  const [showControls, setShowControls] = useState(false);
+  const [entryThreshold, setEntryThreshold] = useState(DEFAULT_TRACKER_CONFIG.entryThreshold);
+  const [triggerMode, setTriggerMode] = useState<TriggerMode>(DEFAULT_TRACKER_CONFIG.triggerMode);
+  const [fxOptions, setFxOptions] = useState<AfterglowFxOptions>(DEFAULT_FX_OPTIONS);
+  const fxOptionsRef = useRef<AfterglowFxOptions>(DEFAULT_FX_OPTIONS);
+  const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState('');
   const [oneEuroEnabled, setOneEuroEnabled] = useState(true);
   const [simulateActive, setSimulateActive] = useState(false);
   const [telemetry, setTelemetry] = useState<TelemetrySnapshot>({
@@ -259,6 +280,33 @@ export default function App() {
   useEffect(() => {
     soundEngine.setMuted(muted);
   }, [muted, soundEngine]);
+  useEffect(() => {
+    soundEngine.setVolume(volume);
+  }, [volume, soundEngine]);
+  useEffect(() => {
+    fxOptionsRef.current = fxOptions;
+  }, [fxOptions]);
+  useEffect(() => {
+    tracker.setConfig({ entryThreshold, triggerMode });
+  }, [entryThreshold, triggerMode, tracker]);
+
+  const refreshVideoDevices = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setVideoDevices(devices.filter((d) => d.kind === 'videoinput'));
+    } catch {
+      // Enumeration can fail without permissions; keep the last known list.
+    }
+  }, []);
+
+  useEffect(() => {
+    const md = navigator.mediaDevices;
+    if (!md?.addEventListener) return;
+    const onDeviceChange = () => void refreshVideoDevices();
+    md.addEventListener('devicechange', onDeviceChange);
+    return () => md.removeEventListener('devicechange', onDeviceChange);
+  }, [refreshVideoDevices]);
 
   const stopActiveMedia = useCallback(() => {
     mediaRevisionRef.current++;
@@ -289,7 +337,7 @@ export default function App() {
   }, [fxEngine, smoother, soundEngine, tracker]);
 
   const startCamera = useCallback(
-    async (facing: 'user' | 'environment' = facingMode) => {
+    async (facing: 'user' | 'environment' = facingMode, deviceId?: string) => {
       setErrorMsg(null);
       stopActiveMedia();
       soundEngine.unlock();
@@ -304,12 +352,19 @@ export default function App() {
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: facing,
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 60, min: 24 },
-          },
+          video: deviceId
+            ? {
+                deviceId: { exact: deviceId },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                frameRate: { ideal: 60, min: 24 },
+              }
+            : {
+                facingMode: facing,
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                frameRate: { ideal: 60, min: 24 },
+              },
           audio: false,
         });
 
@@ -323,7 +378,12 @@ export default function App() {
         await video.play();
         if (revision !== mediaRevisionRef.current) return;
 
-        mirroredRef.current = facing === 'user';
+        const track = stream.getVideoTracks()[0];
+        const trackLabel = track?.label ?? '';
+        setSelectedDeviceId(track?.getSettings().deviceId ?? deviceId ?? '');
+        void refreshVideoDevices();
+        const looksRear = /back|rear|environment/i.test(trackLabel);
+        mirroredRef.current = deviceId ? !looksRear : facing === 'user';
         setMirrored(mirroredRef.current);
         setVideoPaused(false);
         sourceKindRef.current = 'camera';
@@ -337,8 +397,29 @@ export default function App() {
         );
       }
     },
-    [stopActiveMedia, facingMode, soundEngine],
+    [stopActiveMedia, facingMode, soundEngine, refreshVideoDevices],
   );
+
+  const handleSelectDevice = useCallback(
+    (id: string) => {
+      setSelectedDeviceId(id);
+      void startCamera(facingMode, id);
+    },
+    [startCamera, facingMode],
+  );
+
+  const handleChangeVolume = useCallback((v: number) => {
+    setVolume(v);
+    if (v > 0) setMuted(false);
+  }, []);
+
+  const handleResetDefaults = useCallback(() => {
+    setEntryThreshold(DEFAULT_TRACKER_CONFIG.entryThreshold);
+    setTriggerMode(DEFAULT_TRACKER_CONFIG.triggerMode);
+    setFxOptions({ ...DEFAULT_FX_OPTIONS });
+    setVolume(0.85);
+    setMuted(false);
+  }, []);
 
   const handleVideoFileSelect = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -406,9 +487,10 @@ export default function App() {
   // Keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
       const key = e.key.toLowerCase();
       if (key === 'd') setShowHud((v) => !v);
+      else if (key === 'c') setShowControls((v) => !v);
       else if (key === 'm') setMuted((v) => !v);
       else if (key === 's') {
         soundEngine.unlock();
@@ -720,6 +802,7 @@ export default function App() {
         fxHooks,
         rear,
         compositor?.hasMask,
+        fxOptionsRef.current,
       );
       let composited = false;
       if (rear && compositor) {
@@ -728,7 +811,7 @@ export default function App() {
           const rect = computeViewportRect(video.videoWidth, video.videoHeight, width, height, fit);
           composited = compositor.render(
             video, rect, shake.x * width / fw, shake.y * height / fh, isMirrored, fxEngine.scene,
-            poseEval.floorAnchor, poseEval.state !== 'DISSIPATING',
+            poseEval.floorAnchor, poseEval.state !== 'DISSIPATING', fxOptionsRef.current.depthMatte,
           );
         } catch (error) {
           useCanvasFallback(error);
@@ -768,7 +851,13 @@ export default function App() {
           fxRenderMs: lastFxRenderMs,
           pose: poseEval,
           engineInfo: engineInfoRef.current,
-          renderer: compositor ? (compositor.hasMask ? 'WebGL 2 · Person matte' : 'WebGL 2 · Awaiting matte') : 'Canvas 2D',
+          renderer: compositor
+            ? !fxOptionsRef.current.depthMatte
+              ? 'WebGL 2 · Matte bypassed'
+              : compositor.hasMask
+                ? 'WebGL 2 · Person matte'
+                : 'WebGL 2 · Awaiting matte'
+            : 'Canvas 2D',
         });
       }
     };
@@ -840,34 +929,55 @@ export default function App() {
 
       {/* Unified non-intrusive top broadcast rail */}
       {sourceKind !== 'none' && (
-        <header className="pointer-events-none absolute top-4 inset-x-6 z-20 flex items-center justify-between">
-          <div className="flex items-center gap-2.5 rounded-full border border-white/10 bg-[#030611]/85 px-3.5 py-1.5 backdrop-blur-md">
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${
-                telemetry.pose.state === 'ACTIVE'
-                  ? 'bg-[#38bdf8] shadow-[0_0_8px_#38bdf8]'
-                  : telemetry.pose.state === 'CHARGING'
-                    ? 'bg-slate-300'
-                    : 'bg-slate-600'
-              }`}
-            />
-            <span className="font-calligraphy text-sm tracking-wider text-[#f8fafc]">
-              破壊殺 · 終式 / 青銀亂殘光
-            </span>
-            <span className="h-3 w-px bg-white/10" />
-            <span className="text-[10px] font-mono tracking-widest text-slate-400">
-              {sourceKind === 'camera' ? 'LIVE' : 'CLIP'}
-            </span>
-            <span className="h-3 w-px bg-white/10" />
-            <span
-              className={`text-[10px] font-mono tracking-wider ${
-                telemetry.pose.state === 'ACTIVE'
-                  ? 'text-[#38bdf8] font-medium'
-                  : 'text-slate-400'
-              }`}
-            >
-              {telemetry.pose.state}
-            </span>
+        <header className="pointer-events-none absolute top-4 inset-x-6 z-20 flex items-start justify-between">
+          {/* Left column: status pill + Controls Drawer */}
+          <div className="flex flex-col items-start gap-3">
+            <div className="flex items-center gap-2.5 rounded-full border border-white/10 bg-[#030611]/85 px-3.5 py-1.5 backdrop-blur-md">
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  telemetry.pose.state === 'ACTIVE'
+                    ? 'bg-[#38bdf8] shadow-[0_0_8px_#38bdf8]'
+                    : telemetry.pose.state === 'CHARGING'
+                      ? 'bg-slate-300'
+                      : 'bg-slate-600'
+                }`}
+              />
+              <span className="font-calligraphy text-sm tracking-wider text-[#f8fafc]">
+                破壊殺 · 終式 / 青銀亂殘光
+              </span>
+              <span className="h-3 w-px bg-white/10" />
+              <span className="text-[10px] font-mono tracking-widest text-slate-400">
+                {sourceKind === 'camera' ? 'LIVE' : 'CLIP'}
+              </span>
+              <span className="h-3 w-px bg-white/10" />
+              <span
+                className={`text-[10px] font-mono tracking-wider ${
+                  telemetry.pose.state === 'ACTIVE'
+                    ? 'text-[#38bdf8] font-medium'
+                    : 'text-slate-400'
+                }`}
+              >
+                {telemetry.pose.state}
+              </span>
+            </div>
+            {showControls && (
+              <ControlsDrawer
+                entryThreshold={entryThreshold}
+                onChangeEntryThreshold={setEntryThreshold}
+                triggerMode={triggerMode}
+                onChangeTriggerMode={setTriggerMode}
+                fxOptions={fxOptions}
+                onChangeFxOptions={setFxOptions}
+                volume={volume}
+                muted={muted}
+                onChangeVolume={handleChangeVolume}
+                videoDevices={videoDevices}
+                selectedDeviceId={selectedDeviceId}
+                onSelectDevice={handleSelectDevice}
+                onResetDefaults={handleResetDefaults}
+                onClose={() => setShowControls(false)}
+              />
+            )}
           </div>
 
           {/* Right Panels: Pose Guide & Telemetry HUD */}
@@ -875,6 +985,8 @@ export default function App() {
             {showHud && (
               <TechHud
                 telemetry={telemetry}
+                entryThreshold={entryThreshold}
+                triggerMode={triggerMode}
                 oneEuroEnabled={oneEuroEnabled}
                 onToggleOneEuro={() => setOneEuroEnabled((v) => !v)}
               />
@@ -892,7 +1004,7 @@ export default function App() {
       )}
 
       {/* Razor-thin right-edge vertical Stance Lock hairline meter */}
-      {sourceKind !== 'none' && <StanceLockMeter confidence={telemetry.pose.rawConfidence} />}
+      {sourceKind !== 'none' && <StanceLockMeter confidence={telemetry.pose.rawConfidence} threshold={entryThreshold} />}
 
       {/* Editorial Landing Stage before session starts */}
       {sourceKind === 'none' && (
@@ -960,7 +1072,7 @@ export default function App() {
                 </span>
               </span>
               <span>·</span>
-              <span>SHORTCUTS: [D] TELEMETRY · [S] SIMULATE · [G] GUIDE</span>
+              <span>SHORTCUTS: [D] TELEMETRY · [C] CONTROLS · [S] SIMULATE · [G] GUIDE</span>
             </div>
           </div>
         </section>
@@ -1038,6 +1150,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
+              setSelectedDeviceId('');
               if (sourceKind === 'camera') {
                 const nextFacing = facingMode === 'user' ? 'environment' : 'user';
                 setFacingMode(nextFacing);
@@ -1104,6 +1217,21 @@ export default function App() {
           >
             <Activity className="h-3 w-3" />
             <span>D</span>
+          </button>
+
+          {/* Controls (C) */}
+          <button
+            type="button"
+            onClick={() => setShowControls((v) => !v)}
+            title="Toggle controls drawer (C)"
+            className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-mono tracking-wider transition cursor-pointer whitespace-nowrap ${
+              showControls
+                ? 'border border-[#38bdf8]/40 bg-[#38bdf8]/15 text-[#38bdf8]'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+            }`}
+          >
+            <SlidersHorizontal className="h-3 w-3" />
+            <span>C</span>
           </button>
 
           {/* Exit */}

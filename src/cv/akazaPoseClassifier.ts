@@ -9,6 +9,31 @@ export type PoseState = 'IDLE' | 'CHARGING' | 'ACTIVE' | 'DISSIPATING';
 
 export type StanceSide = 'left-lead' | 'right-lead';
 
+export type TriggerMode = 'hold' | 'burst';
+
+export type StrictnessPreset = 'relaxed' | 'balanced' | 'strict';
+
+export const STRICTNESS_THRESHOLDS: Record<StrictnessPreset, number> = {
+  relaxed: 0.64,
+  balanced: 0.74,
+  strict: 0.82,
+};
+
+export interface PoseTrackerConfig {
+  /** Minimum confidence in [0.55, 0.88] required to begin charging. Default 0.74 (Balanced). */
+  entryThreshold: number;
+  /** 'hold' releases when the stance breaks; 'burst' holds ACTIVE for burstDurationSec once locked. */
+  triggerMode: TriggerMode;
+  /** Minimum active burst duration in seconds when triggerMode === 'burst'. Default 4.8s. */
+  burstDurationSec: number;
+}
+
+export const DEFAULT_TRACKER_CONFIG: PoseTrackerConfig = {
+  entryThreshold: STRICTNESS_THRESHOLDS.balanced,
+  triggerMode: 'hold',
+  burstDurationSec: 4.8,
+};
+
 export interface Vec2 {
   x: number;
   y: number;
@@ -98,6 +123,17 @@ function isVisible(lm: Landmark3D | undefined, threshold = 0.35): boolean {
   return Boolean(lm && (lm.visibility ?? 1) >= threshold && lm.y >= 0.01 && lm.y <= 0.99);
 }
 
+function isInFrame(lm: Landmark3D | undefined, threshold = 0.5): boolean {
+  return Boolean(
+    lm &&
+      (lm.visibility ?? 1) >= threshold &&
+      lm.x >= 0.02 &&
+      lm.x <= 0.98 &&
+      lm.y >= 0.03 &&
+      lm.y <= 0.94,
+  );
+}
+
 /**
  * Geometry-based, scale-invariant, mirror-invariant classifier for Akaza's
  * Destructive Death — Final Form: Blue Silver Chaotic Afterglow (Soryu martial arts stance)
@@ -115,20 +151,42 @@ export class AkazaPoseTracker {
   private latchedSide: StanceSide = 'left-lead';
   private lastRawConfidence = 0;
   private prevFloorAnchor: Vec2 | null = null;
+  private burstRemainingSec = 0;
 
-  // Tuned thresholds with hysteresis so the effect locks reliably and never flickers.
-  private readonly ENTRY_THRESHOLD = 0.62;
-  private readonly SUSTAIN_THRESHOLD = 0.46;
-  private readonly CHARGE_DURATION_SEC = 0.22;
+  // Tuned temporal & hysteresis defaults; entryThreshold & triggerMode are live-configurable.
+  private entryThreshold = DEFAULT_TRACKER_CONFIG.entryThreshold;
+  private triggerMode: TriggerMode = DEFAULT_TRACKER_CONFIG.triggerMode;
+  private burstDurationSec = DEFAULT_TRACKER_CONFIG.burstDurationSec;
+  private readonly CHARGE_DURATION_SEC = 0.30;
   private readonly RELEASE_GRACE_SEC = 0.34;
   private readonly DISSIPATE_RATE = 2.4; // fades out in ~0.42s
   private readonly SWITCH_MARGIN = 0.14;
+
+  setConfig(config: Partial<PoseTrackerConfig>): void {
+    if (config.entryThreshold !== undefined) {
+      this.entryThreshold = clamp(config.entryThreshold, 0.55, 0.88);
+    }
+    if (config.triggerMode !== undefined) {
+      this.triggerMode = config.triggerMode;
+      if (this.triggerMode === 'hold') {
+        this.burstRemainingSec = 0;
+      }
+    }
+    if (config.burstDurationSec !== undefined) {
+      this.burstDurationSec = clamp(config.burstDurationSec, 2.0, 10.0);
+    }
+  }
+
+  getEntryThreshold(): number {
+    return this.entryThreshold;
+  }
 
   reset(): void {
     this.state = 'IDLE';
     this.chargeElapsedSec = 0;
     this.activeElapsedSec = 0;
     this.releaseElapsedSec = 0;
+    this.burstRemainingSec = 0;
     this.effectIntensity = 0;
     this.lastTimestampMs = null;
     this.prevLeftWrist = null;
@@ -248,10 +306,13 @@ export class AkazaPoseTracker {
     const nose = landmarks2D[POSE_IDX.NOSE];
     const lEar = landmarks2D[7];
     const rEar = landmarks2D[8];
+    const lMouth = landmarks2D[POSE_IDX.MOUTH_LEFT];
+    const rMouth = landmarks2D[POSE_IDX.MOUTH_RIGHT];
 
     const w = worldLandmarks3D && worldLandmarks3D.length >= 29 ? worldLandmarks3D : null;
 
     let uSpine: { x: number; y: number; z: number } | null = null;
+    let uLat: { x: number; y: number; z: number } | null = null;
     let torsoLen3D = 0;
     let wShMid = { x: 0, y: 0, z: 0 };
     let wHipMid = { x: 0, y: 0, z: 0 };
@@ -282,6 +343,19 @@ export class AkazaPoseTracker {
           x: vTorso.x / torsoLen3D,
           y: vTorso.y / torsoLen3D,
           z: vTorso.z / torsoLen3D,
+        };
+      }
+      const vLat = {
+        x: wRSh.x - wLSh.x,
+        y: wRSh.y - wLSh.y,
+        z: wRSh.z - wLSh.z,
+      };
+      const latLen = Math.hypot(vLat.x, vLat.y, vLat.z);
+      if (latLen > 1e-4) {
+        uLat = {
+          x: vLat.x / latLen,
+          y: vLat.y / latLen,
+          z: vLat.z / latLen,
         };
       }
     }
@@ -315,7 +389,6 @@ export class AkazaPoseTracker {
             (wLeadWr.y - wHipMid.y) * uSpine.y +
             (wLeadWr.z - wHipMid.z) * uSpine.z;
           const leadHeight3D = leadProj / torsoLen3D;
-          // Protect against 2D torso foreshortening when leaning forward in deep crouch
           if (leadHeight > leadHeight3D) {
             leadHeight = Math.min(
               leadHeight,
@@ -348,8 +421,7 @@ export class AkazaPoseTracker {
         }
       }
 
-      // Face-proximity guard: in both full-body and upper-body modes, if candidate lead wrist is right next
-      // to nose or ears (coffee mug, phone, scratching chin), penalize leadArmGuard sharply.
+      // Face-proximity guard: reject mugs, phones, glasses, chin/neck touching
       let minDistFace = dist2D(leadWr, nose);
       if (lEar && (lEar.visibility ?? 1) >= 0.25) {
         minDistFace = Math.min(minDistFace, dist2D(leadWr, lEar));
@@ -357,48 +429,94 @@ export class AkazaPoseTracker {
       if (rEar && (rEar.visibility ?? 1) >= 0.25) {
         minDistFace = Math.min(minDistFace, dist2D(leadWr, rEar));
       }
+      if (lMouth && (lMouth.visibility ?? 1) >= 0.25) {
+        minDistFace = Math.min(minDistFace, dist2D(leadWr, lMouth));
+      }
+      if (rMouth && (rMouth.visibility ?? 1) >= 0.25) {
+        minDistFace = Math.min(minDistFace, dist2D(leadWr, rMouth));
+      }
       const faceRatio = minDistFace / bodyScale;
-      const faceGuardPenalty = smoothstep(0.20, 0.36, faceRatio);
+      const faceGuardPenalty = smoothstep(0.24, 0.42, faceRatio);
 
-      // Akaza's lead fist is held up at chest-to-head level (height ~ 0.65..1.35)
+      // Lead fist raised clearly at upper-chest / shoulder / cheek guard height (0.62..1.42)
       const leadHeightScore =
-        smoothstep(0.45, 0.78, leadHeight) * (1 - smoothstep(1.45, 1.85, leadHeight));
+        smoothstep(0.54, 0.82, leadHeight) * (1 - smoothstep(1.42, 1.80, leadHeight));
 
-      // Lead arm is either extended forward/outward OR held in a tight guard bend
-      const leadReach = dist2D(leadSh, leadWr) / torsoHeight;
+      // Lead arm MUST extend outward (2D reach) OR forward toward camera (3D z reach)
+      // AND keep a martial elbow angle (multiplicative — prevents tucked-arm false positives).
+      const leadReach2D = dist2D(leadSh, leadWr) / torsoHeight;
+      const leadForward3D =
+        wLeadSh && wLeadWr && torsoLen3D > 1e-4
+          ? Math.max(0, (wLeadSh.z - wLeadWr.z) / torsoLen3D)
+          : 0;
+      const leadReachScore = Math.max(
+        smoothstep(0.32, 0.60, leadReach2D),
+        smoothstep(0.24, 0.50, leadForward3D),
+      );
       const leadElbowAngle =
         wLeadSh && wLeadEl && wLeadWr
           ? angle3D(wLeadSh, wLeadEl, wLeadWr)
           : angle3D(leadSh, leadEl, leadWr);
-      // Elbow shouldn't be awkwardly locked overhead; 45°..165° martial guard or strike
-      const leadStructure = Math.max(
-        smoothstep(0.28, 0.55, leadReach),
-        smoothstep(35, 75, leadElbowAngle) * (1 - smoothstep(168, 179, leadElbowAngle)),
-      );
+      const leadElbowScore =
+        smoothstep(38, 72, leadElbowAngle) * (1 - smoothstep(168, 179, leadElbowAngle));
+      const leadStructure = leadReachScore * leadElbowScore;
+
+      // Reject lead wrist crossed deeply across the opposite side of the chest (arms crossed)
+      const leadSideSign = Math.sign(leadSh.x - shMid.x) || 1;
+      const leadSideOffset = ((leadWr.x - shMid.x) * leadSideSign) / shoulderWidth;
+      const leadMidlineGuard = smoothstep(-0.36, -0.04, leadSideOffset);
+
       const leadArmGuard = clamp01(
-        (leadHeightScore * 0.72 + leadStructure * 0.28) * faceGuardPenalty,
+        leadHeightScore * (0.35 + 0.65 * leadStructure) * leadMidlineGuard * faceGuardPenalty,
       );
 
-      // Akaza's rear fist is pulled back / chambered near waist, ribs, or hip (height ~ -0.15..0.62)
+      // Rear fist chambered low near hip/waist/lower ribs (-0.15..0.52)
       const rearHeightScore =
-        smoothstep(-0.3, 0.05, rearHeight) * (1 - smoothstep(0.55, 0.88, rearHeight));
+        smoothstep(-0.22, 0.08, rearHeight) * (1 - smoothstep(0.46, 0.72, rearHeight));
 
-      // Rear elbow is flexed / pulled back (not hanging completely straight limp)
+      // Rear elbow MUST be actively flexed (rejects hanging limp arms >= 158 deg)
       const rearElbowAngle =
         wRearSh && wRearEl && wRearWr
           ? angle3D(wRearSh, wRearEl, wRearWr)
           : angle3D(rearSh, rearEl, rearWr);
-      // In Soryu chambered guard, rear elbow bends (typically 50..155 deg) OR wrist sits back near hip
-      const rearChamberBend = 1 - smoothstep(155, 176, rearElbowAngle);
-      const rearArmChamber = clamp01(rearHeightScore * 0.65 + rearChamberBend * 0.35);
+      const rearChamberBend =
+        smoothstep(32, 62, rearElbowAngle) * (1 - smoothstep(138, 162, rearElbowAngle));
 
-      // Strong vertical separation between lead fist (high) and rear fist (low)
-      // In reference video: (lWr - rWr) / torsoHeight ≈ 0.74
+      // In upper-body (desk) mode, reject a rear hand resting far forward on a keyboard/desk.
+      // In full-body mode, BlazePose monocular z naturally places a chambered hip fist ahead of
+      // the pelvis center, while lower-body horse-stance + squat gates already reject desk sitting.
+      let deskRestGuard = 1;
+      let rearRetractGuard = 1;
+      if (wRearWr && wRearEl && torsoLen3D > 1e-4) {
+        if (resolvedMode === 'upper-body') {
+          const rearForward3D = (wHipMid.z - wRearWr.z) / torsoLen3D;
+          deskRestGuard = 1 - smoothstep(0.50, 0.86, rearForward3D);
+        }
+        const elbowBack3D = (wRearEl.z - wRearWr.z) / torsoLen3D;
+        rearRetractGuard = smoothstep(-0.24, 0.04, elbowBack3D);
+      }
+
+      // Reject rear hand crossed over onto the opposite side of the torso
+      const rearSideSign = Math.sign(rearSh.x - shMid.x) || -1;
+      const rearSideOffset = ((rearWr.x - shMid.x) * rearSideSign) / shoulderWidth;
+      const rearMidlineGuard = smoothstep(-0.18, 0.14, rearSideOffset);
+
+      const rearArmChamber = clamp01(
+        rearHeightScore *
+          (0.28 + 0.72 * rearChamberBend) *
+          deskRestGuard *
+          rearRetractGuard *
+          rearMidlineGuard,
+      );
+
+      // Strong vertical separation between high lead guard and low rear chamber
       const verticalDiff = leadHeight - rearHeight;
-      const armAsymmetry = smoothstep(0.22, 0.58, verticalDiff);
+      const armAsymmetry = smoothstep(0.36, 0.68, verticalDiff);
 
-      const combinedArm =
-        leadArmGuard * 0.38 + rearArmChamber * 0.32 + armAsymmetry * 0.30;
+      // Geometric-heavy arm fusion: missing any of the 3 pillars sharply drops combinedArm
+      const armLinear = leadArmGuard * 0.38 + rearArmChamber * 0.32 + armAsymmetry * 0.30;
+      const armGeo = Math.cbrt(leadArmGuard * rearArmChamber * armAsymmetry);
+      const combinedArm = clamp01(armLinear * 0.38 + armGeo * 0.62);
 
       return { leadArmGuard, rearArmChamber, armAsymmetry, combinedArm };
     };
@@ -415,8 +533,6 @@ export class AkazaPoseTracker {
     );
 
     // Stance-Side Hysteresis Latch (Schmidt Trigger)
-    // Only flip between 'left-lead' and 'right-lead' when opposing side exceeds current by SWITCH_MARGIN (0.14)
-    // or when state === 'IDLE' and rawConfidence < 0.35.
     const isCurrentLeft = this.latchedSide === 'left-lead';
     const currentScore = isCurrentLeft ? leftLeadEval.combinedArm : rightLeadEval.combinedArm;
     const opposingScore = isCurrentLeft ? rightLeadEval.combinedArm : leftLeadEval.combinedArm;
@@ -434,7 +550,7 @@ export class AkazaPoseTracker {
     const rearWrist: Vec2 = isLeftLead ? { x: rWr.x, y: rWr.y } : { x: lWr.x, y: lWr.y };
 
     // -------------------------------------------------------------------------
-    // 2. Evaluate LOWER-BODY SORYU STANCE (Wide horse stance + crouched knees)
+    // 2. Evaluate LOWER-BODY SORYU STANCE (Wide horse stance + both-knee crouch)
     // -------------------------------------------------------------------------
     let stanceWidth = 0;
     let squatDepth = 0;
@@ -442,21 +558,31 @@ export class AkazaPoseTracker {
     if (lowerBodyVisible) {
       const kneeWidth = Math.abs(lKnee.x - rKnee.x);
       const ankleWidth = anklesVisible ? Math.abs(lAnk.x - rAnk.x) : kneeWidth;
-      // Reference video: standing ratio ~1.0, Akaza stance ratio ~1.8..2.1
+      // Standing ratio ~1.0, Akaza wide horse stance ~1.7..2.2
       const widthRatio2D = Math.max(kneeWidth, ankleWidth) / bodyScale;
 
-      // 3D Rotation-Invariant Stance Width
+      // 3D Yaw-Invariant LATERAL Stance Width:
+      // Project knee/ankle separation onto the body's lateral shoulder axis uLat so
+      // 30-45 deg yaw horse stances stay wide while front-to-back walking strides stay narrow.
       let widthRatio = widthRatio2D;
-      if (w) {
+      if (w && uLat) {
         const wLKnee = w[POSE_IDX.LEFT_KNEE];
         const wRKnee = w[POSE_IDX.RIGHT_KNEE];
         const wLAnk = w[POSE_IDX.LEFT_ANKLE];
         const wRAnk = w[POSE_IDX.RIGHT_ANKLE];
         const wLSh = w[POSE_IDX.LEFT_SHOULDER];
         const wRSh = w[POSE_IDX.RIGHT_SHOULDER];
-        const kneeSep3D = dist3D(wLKnee, wRKnee);
-        const footSep3D = dist3D(wLAnk, wRAnk);
-        const sep3D = anklesVisible ? Math.max(kneeSep3D, footSep3D) : kneeSep3D;
+        const kneeLat3D = Math.abs(
+          (wRKnee.x - wLKnee.x) * uLat.x +
+            (wRKnee.y - wLKnee.y) * uLat.y +
+            (wRKnee.z - wLKnee.z) * uLat.z,
+        );
+        const footLat3D = Math.abs(
+          (wRAnk.x - wLAnk.x) * uLat.x +
+            (wRAnk.y - wLAnk.y) * uLat.y +
+            (wRAnk.z - wLAnk.z) * uLat.z,
+        );
+        const sep3D = anklesVisible ? Math.max(kneeLat3D, footLat3D) : kneeLat3D;
         const shoulderWidth3D = Math.max(
           dist3D(wLSh, wRSh),
           dist3D(wShMid, wHipMid) * 0.55,
@@ -464,15 +590,16 @@ export class AkazaPoseTracker {
         const widthRatio3D = sep3D / Math.max(1e-4, shoulderWidth3D);
         widthRatio = Math.max(widthRatio2D, widthRatio3D);
       }
-      stanceWidth = smoothstep(1.12, 1.65, widthRatio);
+      stanceWidth = smoothstep(1.24, 1.80, widthRatio);
 
-      // 2D hip-to-knee drop: standing ~0.64, crouched ~0.16..0.42
+      // 2D hip-to-knee drop: standing ~0.64, crouched ~0.12..0.40
       const kneeMidY = (lKnee.y + rKnee.y) * 0.5;
       const hipToKneeRatio = (kneeMidY - hipMid.y) / torsoHeight;
-      const squat2D = 1 - smoothstep(0.28, 0.62, hipToKneeRatio);
+      const squat2D = 1 - smoothstep(0.24, 0.54, hipToKneeRatio);
 
-      // 3D knee flexion angle if worldLandmarks available (straight ~170°, crouched ~95..148°)
+      // 3D BOTH-knees flexion angle: require both legs bent (prevents single-knee weight shift cheat)
       let squat3D = squat2D;
+      let bothBentGate = 1;
       if (w && anklesVisible) {
         const lKneeAngle = angle3D(
           w[POSE_IDX.LEFT_HIP],
@@ -484,58 +611,57 @@ export class AkazaPoseTracker {
           w[POSE_IDX.RIGHT_KNEE],
           w[POSE_IDX.RIGHT_ANKLE],
         );
-        const minKneeAngle = Math.min(lKneeAngle, rKneeAngle);
+        const maxKneeAngle = Math.max(lKneeAngle, rKneeAngle);
         const avgKneeAngle = (lKneeAngle + rKneeAngle) * 0.5;
-        squat3D = Math.max(
-          1 - smoothstep(115, 158, avgKneeAngle),
-          1 - smoothstep(105, 152, minKneeAngle),
-        );
+        bothBentGate = 1 - smoothstep(154, 170, maxKneeAngle);
+        squat3D =
+          (1 - smoothstep(112, 152, avgKneeAngle)) *
+          (1 - smoothstep(138, 166, maxKneeAngle));
       }
 
-      squatDepth = clamp01(Math.max(squat2D, squat3D * 0.92));
+      squatDepth = clamp01(Math.max(squat2D * bothBentGate, squat3D * 0.96));
 
-      // Seated chair guard: In full-body mode, do NOT penalize genuine deep Akaza horse crouch
-      // (where knees & ankles are wide apart, e.g. max(kneeWidth, ankleWidth)/bodyScale >= 1.45
-      // and hipToKneeRatio can be as low as 0.14!).
-      // ONLY apply chair penalty when ankleWidth / bodyScale < 1.10 AND hipToKneeRatio < 0.30
-      // (narrow tucked ankles under a chair with horizontal thighs).
+      // Seated chair guard: penalize narrow tucked ankles under a chair with horizontal thighs
       if (
         resolvedMode === 'full-body' &&
-        ankleWidth / bodyScale < 1.10 &&
-        hipToKneeRatio < 0.30
+        ankleWidth / bodyScale < 1.15 &&
+        hipToKneeRatio < 0.34
       ) {
         const chairPenalty =
-          smoothstep(0.75, 1.10, ankleWidth / bodyScale) *
-          smoothstep(0.12, 0.30, hipToKneeRatio);
-        squatDepth *= chairPenalty * 0.2;
-        stanceWidth *= chairPenalty * 0.2;
+          smoothstep(0.80, 1.15, ankleWidth / bodyScale) *
+          smoothstep(0.14, 0.34, hipToKneeRatio);
+        squatDepth *= chairPenalty * 0.15;
+        stanceWidth *= chairPenalty * 0.15;
       }
     }
 
     // -------------------------------------------------------------------------
-    // 3. Combine scores based on Full-Body vs Upper-Body mode
+    // 3. Combine scores with strict multiplicative gating
     // -------------------------------------------------------------------------
     let rawConfidence = 0;
     if (resolvedMode === 'full-body') {
-      const lowerScore = stanceWidth * 0.45 + squatDepth * 0.55;
+      const lowerLinear = stanceWidth * 0.45 + squatDepth * 0.55;
+      const lowerGeo = Math.sqrt(stanceWidth * squatDepth);
+      const lowerScore = clamp01(lowerLinear * 0.42 + lowerGeo * 0.58);
       const upperScore = armEval.combinedArm;
-      // Weighted geometric-blended score: requires BOTH stance AND martial arms
-      // so casually waving while standing straight will NOT false-trigger.
-      const weighted = lowerScore * 0.46 + upperScore * 0.54;
-      const gate = Math.sqrt(clamp01(lowerScore + 0.08) * clamp01(upperScore + 0.08));
-      rawConfidence = clamp01(weighted * 0.65 + gate * 0.35);
+
+      // Strict geometric-weighted fusion: standing straight OR relaxed arms CANNOT trigger
+      const weighted = lowerScore * 0.50 + upperScore * 0.50;
+      const gate = Math.sqrt(lowerScore * upperScore);
+      rawConfidence = clamp01(weighted * 0.30 + gate * 0.70);
     } else {
-      // Desk / Upper-Body mode: require both wrists visible so hidden hands below desk don't false-trigger
-      const wristsVisible = isVisible(lWr, 0.35) && isVisible(rWr, 0.35);
+      // Desk / Upper-Body mode: require both wrists & elbows cleanly in frame (no hidden/cropped limbs)
+      const upperClean =
+        isInFrame(lWr, 0.50) &&
+        isInFrame(rWr, 0.50) &&
+        isInFrame(lEl, 0.48) &&
+        isInFrame(rEl, 0.48) &&
+        isVisible(lHip, 0.35) &&
+        isVisible(rHip, 0.35);
       const elbowsSpread = Math.abs(lEl.x - rEl.x) / bodyScale;
-      const readinessBonus = smoothstep(1.05, 1.55, elbowsSpread);
-      rawConfidence = wristsVisible
-        ? clamp01(
-            armEval.leadArmGuard * 0.34 +
-              armEval.rearArmChamber * 0.30 +
-              armEval.armAsymmetry * 0.26 +
-              readinessBonus * 0.10,
-          )
+      const readinessBonus = smoothstep(1.12, 1.58, elbowsSpread);
+      rawConfidence = upperClean
+        ? clamp01(armEval.combinedArm * (0.84 + 0.16 * readinessBonus) * 0.95)
         : 0;
       stanceWidth = readinessBonus;
       squatDepth = armEval.armAsymmetry;
@@ -583,18 +709,22 @@ export class AkazaPoseTracker {
   }
 
   private stepStateMachine(confidence: number, dtSec: number): void {
+    const entry = this.entryThreshold;
+    const sustain = clamp(entry - 0.18, 0.42, 0.74);
+
     switch (this.state) {
       case 'IDLE': {
         this.activeElapsedSec = 0;
+        this.burstRemainingSec = 0;
         this.effectIntensity = Math.max(0, this.effectIntensity - dtSec * this.DISSIPATE_RATE);
-        if (confidence >= this.ENTRY_THRESHOLD) {
+        if (confidence >= entry) {
           this.state = 'CHARGING';
           this.chargeElapsedSec = dtSec;
         }
         break;
       }
       case 'CHARGING': {
-        if (confidence >= this.ENTRY_THRESHOLD * 0.9) {
+        if (confidence >= entry * 0.92) {
           this.chargeElapsedSec += dtSec;
           this.effectIntensity = Math.max(
             this.effectIntensity,
@@ -604,6 +734,7 @@ export class AkazaPoseTracker {
             this.state = 'ACTIVE';
             this.activeElapsedSec = 0;
             this.releaseElapsedSec = 0;
+            this.burstRemainingSec = this.triggerMode === 'burst' ? this.burstDurationSec : 0;
           }
         } else {
           this.chargeElapsedSec = Math.max(0, this.chargeElapsedSec - dtSec * 2.5);
@@ -617,7 +748,10 @@ export class AkazaPoseTracker {
       case 'ACTIVE': {
         this.activeElapsedSec += dtSec;
         this.effectIntensity = Math.min(1, this.effectIntensity + dtSec * 4.2);
-        if (confidence >= this.SUSTAIN_THRESHOLD) {
+        if (this.burstRemainingSec > 0) {
+          this.burstRemainingSec = Math.max(0, this.burstRemainingSec - dtSec);
+        }
+        if (confidence >= sustain || this.burstRemainingSec > 0) {
           this.releaseElapsedSec = 0;
         } else {
           this.releaseElapsedSec += dtSec;
@@ -628,9 +762,10 @@ export class AkazaPoseTracker {
         break;
       }
       case 'DISSIPATING': {
-        if (confidence >= this.ENTRY_THRESHOLD) {
+        if (confidence >= entry) {
           this.state = 'ACTIVE';
           this.releaseElapsedSec = 0;
+          this.burstRemainingSec = this.triggerMode === 'burst' ? this.burstDurationSec : 0;
           break;
         }
         this.effectIntensity = Math.max(0, this.effectIntensity - dtSec * this.DISSIPATE_RATE);
@@ -638,6 +773,7 @@ export class AkazaPoseTracker {
           this.effectIntensity = 0;
           this.activeElapsedSec = 0;
           this.chargeElapsedSec = 0;
+          this.burstRemainingSec = 0;
           this.state = 'IDLE';
         }
         break;

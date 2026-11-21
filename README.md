@@ -16,12 +16,12 @@ Strike Akaza's **Soryu martial arts stance** in front of your webcam. The 12-poi
   - Wide horse stance + low knee crouch
   - Asymmetric Soryu guard (lead fist raised at chest/shoulder height, rear fist chambered low near hip/waist)
   - Automatic **Full-Body ↔ Desk Mode** adaptation if lower-body landmarks are out of frame
-- **Hysteresis Temporal State Machine**: `IDLE → CHARGING → ACTIVE → DISSIPATING` with entry debounce (`220ms`) and exit hysteresis (`340ms`) to prevent false triggers and flicker.
+- **Hysteresis Temporal State Machine**: `IDLE → CHARGING → ACTIVE → DISSIPATING` with entry debounce (`300ms`), exit hysteresis (`340ms`), live strictness presets (`Relaxed` / `Balanced` / `Strict`), and optional `Burst (5s)` trigger mode so you can strike once and punch freely through the full sequence.
 - **WebGL 2 camera compositing** uses the pose model's confidence mask to keep the performer in front of the projected compass, rear strikes, and aura. A Sobel filter adds edge lighting, and two low-resolution blur passes add bloom. The shockwave refracts the background camera image.
 - **Delayed silhouettes** come from an eight-frame texture array of masked camera snapshots. Four samples replay the performer at delays of roughly 140–470 ms, with positions anchored to the tracked stance.
 - **Foreground effects** include blue-silver strikes, firework bursts, wrist-tracked vortices, and a timed calligraphy reveal. The front layer softens over the detected face. The Canvas 2D scene remains available when the WebGL renderer is unavailable.
 - **Procedural stereo sound** follows the pose lock, compass impact, and each silhouette's entrance. Foreground strikes sweep across the stereo field, punch accents follow the wrist, and filtered reflections give the crystal sounds a short room tail. Audio is generated in the browser.
-- **Engineer CV Telemetry HUD (`D` key)**: Live FPS, inference and matte processing latency, FX submission time, active renderer, One-Euro filter toggle, skeleton overlay, and pose confidence bars.
+- **Control Deck (`C` key) & Engineer CV Telemetry HUD (`D` key)**: Live strictness presets and lock-gate slider, Hold/Burst trigger mode, per-layer pipeline toggles (`Depth Matte`, `4× Echoes`, `Compass`, `Strikes`), FX intensity and audio volume sliders, camera device selector, live FPS/latency metrics, One-Euro filter toggle, and skeleton overlay.
 - **Video Clip Test Mode**: Load a local `.mov` or `.mp4` file supported by your browser to run the camera pipeline on repeatable footage. Press `Space` to pause or resume it.
 
 ---
@@ -60,6 +60,7 @@ Open `http://localhost:5173` and click **Initialize Camera**. Step back until bo
 | Key | Action |
 | --- | --- |
 | `D` | Toggle CV Telemetry HUD & skeleton overlay |
+| `C` | Toggle Control Deck (strictness, burst mode, layer toggles, volume, camera) |
 | `S` | Toggle manual FX preview simulation |
 | `M` | Mute / unmute procedural sound FX |
 | `G` | Show / hide pose stance guide |

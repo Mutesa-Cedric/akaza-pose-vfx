@@ -303,6 +303,7 @@ export class AfterglowCompositor {
     scene: AfterglowScene,
     sourceFloor: Vec2,
     capture: boolean,
+    depthMatteEnabled = true,
   ): boolean {
     const gl = this.gl;
     if (gl.isContextLost()) return false;
@@ -320,7 +321,8 @@ export class AfterglowCompositor {
       }
       this.lastVideoTime = video.currentTime;
     }
-    if (capture && this.maskValid && video.currentTime - this.lastEchoTime >= ECHO_INTERVAL_SEC) {
+    const useMask = depthMatteEnabled && this.maskValid;
+    if (capture && useMask && video.currentTime - this.lastEchoTime >= ECHO_INTERVAL_SEC) {
       this.capture(video.currentTime, sourceFloor);
     }
     this.resolveEchoes(video.currentTime, sourceFloor);
@@ -345,7 +347,7 @@ export class AfterglowCompositor {
     this.sampler(rear.rearEffects, 1, this.rear);
     this.sampler(rear.compass, 2, this.compass);
     this.sampler(rear.echoes, 3, this.echoes, gl.TEXTURE_2D_ARRAY);
-    gl.uniform1f(rear.hasMask, Number(this.maskValid));
+    gl.uniform1f(rear.hasMask, Number(useMask));
     gl.uniform4f(rear.videoRect, left, top, videoW, videoH);
     gl.uniform1f(rear.mirrored, Number(mirrored));
     gl.uniform4fv(rear['echoFrames[0]'], this.echoFrames);
@@ -365,7 +367,7 @@ export class AfterglowCompositor {
     this.sampler(final.camera, 1, this.camera);
     this.sampler(final.emission, 2, this.emission.texture);
     this.sampler(final.bloom, 3, this.bloomY.texture);
-    gl.uniform1f(final.hasMask, Number(this.maskValid));
+    gl.uniform1f(final.hasMask, Number(useMask));
     gl.uniform4f(final.videoRect, left, top, videoW, videoH);
     gl.uniform1f(final.mirrored, Number(mirrored));
     gl.uniform2f(final.aspect, aspectX, aspectY);
