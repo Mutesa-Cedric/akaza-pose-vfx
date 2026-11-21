@@ -4,45 +4,65 @@
 
 A real-time, 100% in-browser camera VFX web app inspired by Akaza's **Destructive Death — Final Form: Blue Silver Chaotic Afterglow** (*Hakai-satsu, Shūshiki: Aogin Ranzankō*) from *Demon Slayer: Kimetsu no Yaiba*.
 
-Strike Akaza's **Soryu martial arts stance** in front of your webcam. The 12-point **Snowflake Compass Needle** (*破壊殺・羅針*) opens under your feet, a shockwave bends the room, and four blue-silver silhouettes fan out around you. Each silhouette replays a different moment of your movement.
+Strike Akaza's **Soryu martial arts stance** in front of your webcam. The 12-point **Snowflake Compass Needle** (*破壊殺・羅針*) opens under your feet, a shockwave refracts the room, and four blue-silver silhouettes fan out around you — each replaying a different delayed moment of your movement.
 
 ---
 
 ## Features
 
-- **100% Client-Side Real-Time CV**: Runs MediaPipe Tasks Vision (`PoseLandmarker` BlazePose Lite FP16) locally in the browser using WebGL/GPU acceleration with automatic CPU/WASM fallback.
-- **One-Euro Adaptive Landmark Smoothing**: Implements the [One-Euro Filter](https://gery.casiez.net/1euro/) (`minCutoff: 1.8Hz`, `beta: 0.04`) per landmark axis with automatic stale-gap reset and reusable landmark buffers.
-- **Scale-, Angle-, and Mirror-Invariant Pose Classifier**: Combines 3D `worldLandmarks` joint flexion angles with 2D normalized proportions to detect Akaza's stance regardless of distance from the camera, left/right lead side, or slight 3/4 body rotation:
-  - Wide horse stance + low knee crouch
-  - Asymmetric Soryu guard (lead fist raised at chest/shoulder height, rear fist chambered low near hip/waist)
-  - Automatic **Full-Body ↔ Desk Mode** adaptation if lower-body landmarks are out of frame
-- **Hysteresis Temporal State Machine**: `IDLE → CHARGING → ACTIVE → DISSIPATING` with entry debounce (`300ms`), exit hysteresis (`340ms`), live strictness presets (`Relaxed` / `Balanced` / `Strict`), and optional `Burst (5s)` trigger mode so you can strike once and punch freely through the full sequence.
-- **WebGL 2 camera compositing** uses the pose model's confidence mask to keep the performer in front of the projected compass, rear strikes, and aura. A Sobel filter adds edge lighting, and two low-resolution blur passes add bloom. The shockwave refracts the background camera image.
-- **Delayed silhouettes** come from an eight-frame texture array of masked camera snapshots. Four samples replay the performer at delays of roughly 140–470 ms, with positions anchored to the tracked stance.
-- **Foreground effects** include blue-silver strikes, firework bursts, wrist-tracked vortices, and a timed calligraphy reveal. The front layer softens over the detected face. The Canvas 2D scene remains available when the WebGL renderer is unavailable.
-- **Procedural stereo sound** follows the pose lock, compass impact, and each silhouette's entrance. Foreground strikes sweep across the stereo field, punch accents follow the wrist, and filtered reflections give the crystal sounds a short room tail. Audio is generated in the browser.
-- **Control Deck (`C` key) & Engineer CV Telemetry HUD (`D` key)**: Live strictness presets and lock-gate slider, Hold/Burst trigger mode, per-layer pipeline toggles (`Depth Matte`, `4× Echoes`, `Compass`, `Strikes`), FX intensity and audio volume sliders, camera device selector, live FPS/latency metrics, One-Euro filter toggle, and skeleton overlay.
-- **Video Clip Test Mode**: Load a local `.mov` or `.mp4` file supported by your browser to run the camera pipeline on repeatable footage. Press `Space` to pause or resume it.
+- **100% Client-Side Real-Time CV & Fast Cold Start**: Runs MediaPipe Tasks Vision (`PoseLandmarker` BlazePose Lite FP16) locally in the browser using WebGL/GPU acceleration with automatic CPU/WASM fallback. Preloads the FP16 model and WASM fileset in parallel and lets the camera open immediately while CV warms up in the background.
+- **One-Euro Adaptive Landmark Smoothing**: Implements the [One-Euro Filter](https://gery.casiez.net/1euro/) per axis for both 2D normalized landmarks (`minCutoff: 0.85 Hz`, `beta: 3.2`) and 3D `worldLandmarks` (`minCutoff: 1.0 Hz`, `beta: 2.5`) with >400 ms stale-gap reset and reusable pre-allocated buffers.
+- **Scale-, Yaw-, and Mirror-Invariant Soryu Classifier**: Uses multiplicative geometric gating across 3D `worldLandmarks` and 2D normalized proportions so casual gestures, waving, walking strides, and sitting at a desk stay `IDLE`:
+  - **3D lateral stance projection** onto the shoulder-to-shoulder axis (stays wide at 30°–45° yaw while rejecting front-to-back walking strides)
+  - **Both-knees flexion check** (`avgKneeAngle` + `maxKneeAngle`) with seated-chair rejection
+  - **Asymmetric Soryu guard**: extended/forward lead fist at shoulder height (with nose/mouth/ear proximity and chest-midline guards) paired with a flexed rear chamber near the hip
+  - **Automatic Full-Body ↔ Desk Mode** adaptation with strict in-frame wrist/elbow gating
+- **Hysteresis Temporal State Machine**: `IDLE → CHARGING → ACTIVE → DISSIPATING` with `300 ms` charge debounce, `340 ms` exit hysteresis, live strictness presets (`Relaxed 64%` / `Balanced 74%` / `Strict 82%`), and optional **`Burst 5s`** mode so you can trigger once and punch freely through the full sequence.
+- **WebGL 2 Depth Compositor**: Uses MediaPipe's person confidence mask (cleaned via torso-seeded flood fill and GPU temporal smoothing) to keep the performer in front of the perspective-projected floor compass, rear strikes, and aura. Adds Sobel rim lighting, two-pass separable bloom, and shockwave background refraction, with automatic Canvas 2D fallback if WebGL is unavailable.
+- **Delayed Motion Silhouettes**: Captures masked camera snapshots into an 8-layer `TEXTURE_2D_ARRAY` and replays four glowing silhouettes delayed by ~140–470 ms around the tracked stance.
+- **Foreground VFX**: Pre-baked offscreen sprites for the razor-needle barrage, Koyuki firework bursts, wrist-tracked vortices, face-protected compositing, and a timed calligraphy reveal.
+- **Procedural Stereo Web Audio**: Synthesizes the rising charge tone, compass impact drop, four stereo-panned echo cues synced to silhouette entrances, sweeping foreground slashes, and wrist-panned punch bursts entirely in-browser.
+- **Control Deck (`C` key) & Telemetry HUD (`D` key)**: Live strictness presets and lock-gate slider, `Hold` / `Burst 5s` release toggle, per-layer pipeline switches (`Depth Matte`, `4× Echoes`, `Compass`, `Strikes`), FX intensity and audio level sliders, camera device selector, live FPS/inference/matte/FX latency counters, One-Euro filter toggle, and debug skeleton overlay.
+- **Video Clip Test Mode**: Load any browser-supported local `.mov` or `.mp4` clip to run the full pipeline on repeatable footage (`Space` to pause/resume).
 
 ---
 
 ## Architecture
 
-```
-Webcam / Test Video
-  │
-  ▼
-MediaPipe PoseLandmarker (GPU → CPU fallback)
-  ├─ 2D + 3D landmarks → One-Euro filter → Pose classifier + state machine
-  │                                         ├─ Pose anchors + effect timing ──┐
-  │                                         └─ Particles, audio, HUD         │
-  └─ Person mask → Confidence cleanup + temporal smoothing ─────────────────┤
-                                                                              ▼
-   WebGL 2 compositor (projected compass, occlusion, echoes, refraction, bloom)
-     + Canvas 2D foreground (wrist effects, strikes, calligraphy)
+```mermaid
+flowchart TD
+  Input["Webcam / Local Video Clip"] --> MP["MediaPipe PoseLandmarker (GPU -> WASM fallback)"]
+
+  MP --> LM["2D + 3D World Landmarks"]
+  MP --> Mask["Person Segmentation Mask"]
+
+  LM --> Filter["One-Euro Filter (2D + 3D)"]
+  Filter --> Classifier["Soryu Pose Classifier & State Machine"]
+  Classifier -->|"Anchors & Timing"| FX["Afterglow FX Engine (Canvas 2D)"]
+  Classifier -->|"State & Panning Cues"| Audio["Procedural Stereo Audio (Web Audio)"]
+  Classifier -->|"Sub-Scores & Gate"| HUD["Telemetry HUD & Control Deck"]
+
+  Mask --> Matte["Torso Flood-Fill + GPU Temporal Smoothing"]
+  Matte --> WebGL["WebGL 2 Compositor (Floor Compass, Occlusion, 4x Echoes, Refraction, Bloom)"]
+  FX -->|"Rear Strikes"| WebGL
+  WebGL --> Stage["Layered Viewport Composite"]
+  FX -->|"Foreground Strikes, Wrists, Calligraphy"| Stage
 ```
 
-This is a camera-relative 2.5D effect. The app projects the compass relative to the tracked feet and uses a soft person mask for foreground and background depth. MediaPipe and the compositor own separate WebGL contexts. For a GPU mask, the app downsamples it into an 8-bit target in the MediaPipe context, reads the confidence bytes inside the inference callback, and uploads them for temporal stabilization. The echo textures hold recent masked frames in browser memory.
+### Temporal State Machine
+
+```mermaid
+stateDiagram-v2
+  [*] --> IDLE
+  IDLE --> CHARGING: confidence >= lock gate
+  CHARGING --> IDLE: confidence drops before 300ms
+  CHARGING --> ACTIVE: held >= 300ms (impact + 4x echoes)
+  ACTIVE --> DISSIPATING: stance broken > 340ms (or Burst 5s ends)
+  DISSIPATING --> ACTIVE: stance re-locked
+  DISSIPATING --> IDLE: intensity faded
+```
+
+This is a camera-relative 2.5D pipeline. The compass is inverse-projected onto a floor plane anchored to the tracked feet while a stabilized person matte separates background and foreground layers. Because MediaPipe and the compositor own separate WebGL contexts, GPU masks are downsampled into an 8-bit target inside MediaPipe's context, read back synchronously inside the inference callback, flood-filled from the tracked torso to suppress bystanders, and uploaded for GPU temporal stabilization and echo history capture.
 
 ---
 
@@ -53,7 +73,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` and click **Initialize Camera**. Step back until both feet fit in frame, take a wide stance, bend your knees, and raise one hand while keeping the other near your hip.
+Open `http://localhost:5173` and click **Initialize Camera**. Step back until your knees/feet fit in frame, drop into a wide horse stance, raise your lead fist forward at shoulder height, and chamber your rear fist low by your hip.
 
 ### Keyboard Shortcuts
 
@@ -64,6 +84,7 @@ Open `http://localhost:5173` and click **Initialize Camera**. Step back until bo
 | `S` | Toggle manual FX preview simulation |
 | `M` | Mute / unmute procedural sound FX |
 | `G` | Show / hide pose stance guide |
+| `Space` | Pause / resume loaded video clip |
 
 ---
 

@@ -410,7 +410,7 @@ export default function App() {
 
   const handleChangeVolume = useCallback((v: number) => {
     setVolume(v);
-    if (v > 0) setMuted(false);
+    setMuted(v <= 0.001);
   }, []);
 
   const handleResetDefaults = useCallback(() => {
@@ -491,8 +491,13 @@ export default function App() {
       const key = e.key.toLowerCase();
       if (key === 'd') setShowHud((v) => !v);
       else if (key === 'c') setShowControls((v) => !v);
-      else if (key === 'm') setMuted((v) => !v);
-      else if (key === 's') {
+      else if (key === 'm') {
+        soundEngine.unlock();
+        setMuted((wasMuted) => {
+          if (wasMuted && volume <= 0.001) setVolume(0.85);
+          return !wasMuted;
+        });
+      } else if (key === 's') {
         soundEngine.unlock();
         setSimulateActive((v) => !v);
       } else if (key === 'g') setShowGuide((v) => !v);
@@ -503,7 +508,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [toggleVideoPause, soundEngine]);
+  }, [toggleVideoPause, soundEngine, volume]);
 
   // Advance the effects on display frames and run inference on fresh media frames.
   useEffect(() => {
@@ -952,12 +957,14 @@ export default function App() {
               <span className="h-3 w-px bg-white/10" />
               <span
                 className={`text-[10px] font-mono tracking-wider ${
-                  telemetry.pose.state === 'ACTIVE'
-                    ? 'text-[#38bdf8] font-medium'
-                    : 'text-slate-400'
+                  modelStatus === 'loading'
+                    ? 'text-slate-300'
+                    : telemetry.pose.state === 'ACTIVE'
+                      ? 'text-[#38bdf8] font-medium'
+                      : 'text-slate-400'
                 }`}
               >
-                {telemetry.pose.state}
+                {modelStatus === 'loading' ? 'LOADING CV…' : telemetry.pose.state}
               </span>
             </div>
             {showControls && (
@@ -1040,20 +1047,16 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => void startCamera()}
-                disabled={modelStatus === 'loading'}
-                className="group inline-flex items-center gap-2.5 rounded-full border border-[#38bdf8]/40 bg-[#030611]/90 px-6 py-3 font-mono text-xs tracking-wider text-[#f8fafc] hover:border-[#38bdf8] hover:bg-slate-900/90 disabled:opacity-40 transition duration-300 backdrop-blur-md cursor-pointer"
+                className="group inline-flex items-center gap-2.5 rounded-full border border-[#38bdf8]/40 bg-[#030611]/90 px-6 py-3 font-mono text-xs tracking-wider text-[#f8fafc] hover:border-[#38bdf8] hover:bg-slate-900/90 transition duration-300 backdrop-blur-md cursor-pointer"
               >
                 <Camera className="h-3.5 w-3.5 text-[#38bdf8]" />
-                <span>
-                  {modelStatus === 'loading' ? 'Initializing Vision Engine…' : 'Initialize Camera'}
-                </span>
+                <span>Initialize Camera</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={modelStatus === 'loading'}
-                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-transparent px-5 py-3 font-mono text-xs tracking-wider text-slate-300 hover:border-white/30 hover:text-white disabled:opacity-40 transition duration-300 cursor-pointer"
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-transparent px-5 py-3 font-mono text-xs tracking-wider text-slate-300 hover:border-white/30 hover:text-white transition duration-300 cursor-pointer"
               >
                 <Upload className="h-3.5 w-3.5 text-slate-400" />
                 <span>Load Test Footage</span>
@@ -1182,7 +1185,10 @@ export default function App() {
             type="button"
             onClick={() => {
               soundEngine.unlock();
-              setMuted((v) => !v);
+              setMuted((wasMuted) => {
+                if (wasMuted && volume <= 0.001) setVolume(0.85);
+                return !wasMuted;
+              });
             }}
             title="Mute sound FX (M)"
             className={`rounded-full p-1.5 transition cursor-pointer ${

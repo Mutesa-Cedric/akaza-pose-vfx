@@ -61,22 +61,40 @@ export const POSE_CONNECTIONS: ReadonlyArray<[number, number]> = [
   [30, 32],
 ];
 
+let cachedModelBytes: Promise<Uint8Array | null> | null = null;
+
+function prefetchModelBytes(): Promise<Uint8Array | null> {
+  if (!cachedModelBytes) {
+    cachedModelBytes = fetch(POSE_MODEL_URL, { mode: 'cors', credentials: 'omit' })
+      .then((res) => (res.ok ? res.arrayBuffer() : null))
+      .then((buf) => (buf ? new Uint8Array(buf) : null))
+      .catch(() => null);
+  }
+  return cachedModelBytes;
+}
+
 /**
  * Loads MediaPipe PoseLandmarker in VIDEO mode with GPU delegate first, falling back
  * gracefully to CPU/WASM if WebGL/GPU initialization fails on the user's browser.
+ * Downloads the WASM runtime and the 5.7 MB FP16 model in parallel to eliminate the
+ * sequential network waterfall on cold loads.
  */
 export async function createPoseEngine(outputSegmentationMasks: boolean): Promise<{
   landmarker: PoseLandmarker;
   info: PoseEngineInfo;
 }> {
-  const vision = await FilesetResolver.forVisionTasks(WASM_CDN);
+  const [vision, modelBytes] = await Promise.all([
+    FilesetResolver.forVisionTasks(WASM_CDN),
+    prefetchModelBytes(),
+  ]);
 
   const tryCreate = async (delegate: InferenceDelegate) => {
+    const baseOptions = modelBytes
+      ? { modelAssetBuffer: modelBytes.slice(), delegate }
+      : { modelAssetPath: POSE_MODEL_URL, delegate };
+
     return PoseLandmarker.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath: POSE_MODEL_URL,
-        delegate,
-      },
+      baseOptions,
       runningMode: 'VIDEO',
       numPoses: 1,
       minPoseDetectionConfidence: 0.45,
