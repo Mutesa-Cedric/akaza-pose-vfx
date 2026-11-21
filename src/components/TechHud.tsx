@@ -4,9 +4,11 @@ import type { PoseEngineInfo } from '../cv/poseLandmarker';
 export interface TelemetrySnapshot {
   fps: number;
   inferenceMs: number;
+  maskMs: number;
   fxRenderMs: number;
   pose: PoseEvaluation;
   engineInfo: PoseEngineInfo | null;
+  renderer: string;
 }
 
 interface TechHudProps {
@@ -59,7 +61,7 @@ function HairlineMetric({
 }
 
 export function TechHud({ telemetry, oneEuroEnabled, onToggleOneEuro }: TechHudProps) {
-  const { fps, inferenceMs, fxRenderMs, pose, engineInfo } = telemetry;
+  const { fps, inferenceMs, maskMs, fxRenderMs, pose, engineInfo, renderer } = telemetry;
 
   return (
     <aside className="pointer-events-auto w-72 rounded-xl border border-white/10 bg-[#030611]/90 p-3.5 backdrop-blur-md shadow-2xl select-none">
@@ -72,6 +74,7 @@ export function TechHud({ telemetry, oneEuroEnabled, onToggleOneEuro }: TechHudP
           <p className="text-[11px] font-mono text-slate-300 truncate max-w-[170px]">
             {engineInfo ? `${engineInfo.modelName} · ${engineInfo.delegate.toUpperCase()}` : 'INITIALIZING…'}
           </p>
+          <p className="text-[10px] font-mono text-slate-400">{renderer}</p>
         </div>
         <span
           className={`rounded border px-2 py-0.5 text-[9px] font-mono font-medium tracking-widest ${STATE_BADGE[pose.state]}`}
@@ -80,7 +83,6 @@ export function TechHud({ telemetry, oneEuroEnabled, onToggleOneEuro }: TechHudP
         </span>
       </div>
 
-      {/* Crisp FPS · INFER · FX · MODE stat strip */}
       <div className="mt-2.5 grid grid-cols-4 gap-1.5 font-mono text-center">
         <div className="rounded border border-white/5 bg-[#070b14]/80 py-1.5 px-1">
           <div className="text-[8px] text-slate-500 tracking-widest uppercase">FPS</div>
@@ -93,15 +95,15 @@ export function TechHud({ telemetry, oneEuroEnabled, onToggleOneEuro }: TechHudP
           </div>
         </div>
         <div className="rounded border border-white/5 bg-[#070b14]/80 py-1.5 px-1">
-          <div className="text-[8px] text-slate-500 tracking-widest uppercase">FX</div>
+          <div className="text-[8px] text-slate-500 tracking-widest uppercase">MATTE</div>
           <div className="text-xs font-medium text-slate-100 tabular-nums">
-            {fxRenderMs.toFixed(1)}ms
+            {maskMs.toFixed(1)}ms
           </div>
         </div>
         <div className="rounded border border-white/5 bg-[#070b14]/80 py-1.5 px-1">
-          <div className="text-[8px] text-slate-500 tracking-widest uppercase">MODE</div>
-          <div className="text-[11px] font-medium text-slate-100">
-            {pose.resolvedMode === 'full-body' ? 'FULL' : 'DESK'}
+          <div className="text-[8px] text-slate-500 tracking-widest uppercase">FX SUBMIT</div>
+          <div className="text-xs font-medium text-slate-100 tabular-nums">
+            {fxRenderMs.toFixed(1)}ms
           </div>
         </div>
       </div>
@@ -152,6 +154,7 @@ export function TechHud({ telemetry, oneEuroEnabled, onToggleOneEuro }: TechHudP
 
       {/* Stance orientation & wrist speed */}
       <div className="mt-2 flex items-center justify-between text-[9px] font-mono text-slate-500 pt-1">
+        <span>{pose.resolvedMode === 'full-body' ? 'FULL BODY' : 'DESK'}</span>
         <span>LEAD: {pose.stanceSide.toUpperCase()}</span>
         <span className="tabular-nums">WRIST V: {pose.wristSpeed.toFixed(2)}</span>
       </div>

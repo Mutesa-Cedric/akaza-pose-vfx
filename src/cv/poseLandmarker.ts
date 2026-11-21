@@ -63,7 +63,7 @@ export const POSE_CONNECTIONS: ReadonlyArray<[number, number]> = [
  * Loads MediaPipe PoseLandmarker in VIDEO mode with GPU delegate first, falling back
  * gracefully to CPU/WASM if WebGL/GPU initialization fails on the user's browser.
  */
-export async function createPoseEngine(): Promise<{
+export async function createPoseEngine(outputSegmentationMasks: boolean): Promise<{
   landmarker: PoseLandmarker;
   info: PoseEngineInfo;
 }> {
@@ -80,7 +80,7 @@ export async function createPoseEngine(): Promise<{
       minPoseDetectionConfidence: 0.45,
       minPosePresenceConfidence: 0.45,
       minTrackingConfidence: 0.45,
-      outputSegmentationMasks: false,
+      outputSegmentationMasks,
     });
   };
 

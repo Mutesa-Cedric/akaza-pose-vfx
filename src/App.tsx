@@ -19,10 +19,12 @@ import {
 import { PoseLandmarkSmoother, type Landmark3D } from './cv/oneEuroFilter';
 import {
   createPoseEngine,
+  POSE_IDX,
   type PoseEngineInfo,
   type PoseLandmarker,
 } from './cv/poseLandmarker';
 import { AfterglowFxEngine, type AfterglowFrameHooks } from './fx/afterglowEngine';
+import { AfterglowCompositor, MAX_COMPOSITE_SIZE } from './fx/afterglowCompositor';
 import {
   drawDebugSkeleton,
   type VideoViewportRect,
@@ -191,49 +193,17 @@ function StanceLockMeter({ confidence }: { confidence: number }) {
 export default function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const stageCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const compositeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const fxCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Core CV & FX engine instances
   const landmarkerRef = useRef<PoseLandmarker | null>(null);
-  const smootherRef = useRef(new PoseLandmarkSmoother(33));
-  const trackerRef = useRef(new AkazaPoseTracker());
-  const fxEngineRef = useRef(new AfterglowFxEngine());
-  const soundEngineRef = useRef(new AfterglowSoundEngine());
+  const [smoother] = useState(() => new PoseLandmarkSmoother(33));
+  const [tracker] = useState(() => new AkazaPoseTracker());
+  const [fxEngine] = useState(() => new AfterglowFxEngine());
+  const [soundEngine] = useState(() => new AfterglowSoundEngine());
 
-  // Pre-allocated reusable pose evaluation and FX hooks for zero per-frame hot-loop allocations
-  const mappedPoseRef = useRef<PoseEvaluation>({
-    hasPerson: false,
-    resolvedMode: 'full-body',
-    stanceSide: 'left-lead',
-    subScores: {
-      stanceWidth: 0,
-      squatDepth: 0,
-      leadArmGuard: 0,
-      rearArmChamber: 0,
-      armAsymmetry: 0,
-    },
-    rawConfidence: 0,
-    state: 'IDLE',
-    chargeProgress: 0,
-    effectIntensity: 0,
-    activeDurationSec: 0,
-    floorAnchor: { x: 0.5, y: 0.85 },
-    bodyCenter: { x: 0.5, y: 0.5 },
-    bodyScale: 0.14,
-    leadWrist: { x: 0.55, y: 0.45 },
-    rearWrist: { x: 0.45, y: 0.55 },
-    wristSpeed: 0,
-  });
-
-  const fxHooksRef = useRef<AfterglowFrameHooks>({
-    onActivate: () => soundEngineRef.current.playActivate(),
-    onBarrageTick: () => soundEngineRef.current.playBarrageSlice(),
-    onPunchBurst: () => soundEngineRef.current.playPunchBurst(),
-    onDissipate: () => soundEngineRef.current.playDissipate(),
-  });
-
-  // Mutable settings refs read directly by the 60fps render loop
+  // Mutable settings read by the render loop.
   const engineInfoRef = useRef<PoseEngineInfo | null>(null);
   const modeRef = useRef<DetectionMode>('auto');
   const mirroredRef = useRef(true);
@@ -241,6 +211,8 @@ export default function App() {
   const oneEuroRef = useRef(true);
   const simulateRef = useRef(false);
   const sourceKindRef = useRef<MediaSourceKind>('none');
+  const mediaRevisionRef = useRef(0);
+  const segmentationEnabledRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
   const videoUrlRef = useRef<string | null>(null);
 
@@ -261,15 +233,14 @@ export default function App() {
   const [telemetry, setTelemetry] = useState<TelemetrySnapshot>({
     fps: 0,
     inferenceMs: 0,
+    maskMs: 0,
     fxRenderMs: 0,
     pose: INITIAL_POSE,
     engineInfo: null,
+    renderer: 'Canvas 2D',
   });
 
   // Keep refs synchronized with UI toggles
-  useEffect(() => {
-    engineInfoRef.current = engineInfo;
-  }, [engineInfo]);
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
@@ -286,40 +257,12 @@ export default function App() {
     simulateRef.current = simulateActive;
   }, [simulateActive]);
   useEffect(() => {
-    soundEngineRef.current.setMuted(muted);
-  }, [muted]);
-
-  // Initialize MediaPipe PoseLandmarker on mount
-  useEffect(() => {
-    let cancelled = false;
-
-    createPoseEngine()
-      .then(({ landmarker, info }) => {
-        if (cancelled) {
-          landmarker.close();
-          return;
-        }
-        landmarkerRef.current = landmarker;
-        engineInfoRef.current = info;
-        setEngineInfo(info);
-        setModelStatus('ready');
-      })
-      .catch((err) => {
-        console.error('[PoseEngine] Failed to load:', err);
-        if (!cancelled) {
-          setModelStatus('error');
-          setErrorMsg('Failed to load MediaPipe Pose model. Check your internet connection.');
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      landmarkerRef.current?.close();
-      landmarkerRef.current = null;
-    };
-  }, []);
+    soundEngine.setMuted(muted);
+  }, [muted, soundEngine]);
 
   const stopActiveMedia = useCallback(() => {
+    mediaRevisionRef.current++;
+    soundEngine.stopSession();
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
@@ -339,16 +282,20 @@ export default function App() {
     setSourceKind('none');
     setVideoPaused(false);
     setSimulateActive(false);
-    smootherRef.current.reset();
-    trackerRef.current.reset();
-    fxEngineRef.current.reset();
-  }, []);
+    simulateRef.current = false;
+    smoother.reset();
+    tracker.reset();
+    fxEngine.reset();
+  }, [fxEngine, smoother, soundEngine, tracker]);
 
   const startCamera = useCallback(
     async (facing: 'user' | 'environment' = facingMode) => {
       setErrorMsg(null);
-      soundEngineRef.current.unlock();
       stopActiveMedia();
+      soundEngine.unlock();
+      const revision = mediaRevisionRef.current;
+      const video = videoRef.current;
+      if (!video) return;
 
       if (!navigator.mediaDevices?.getUserMedia) {
         setErrorMsg('Camera access requires HTTPS or localhost in a modern browser.');
@@ -366,26 +313,31 @@ export default function App() {
           audio: false,
         });
 
-        streamRef.current = stream;
-        const video = videoRef.current;
-        if (video) {
-          video.srcObject = stream;
-          video.loop = false;
-          await video.play();
+        if (revision !== mediaRevisionRef.current) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
         }
+        streamRef.current = stream;
+        video.srcObject = stream;
+        video.loop = false;
+        await video.play();
+        if (revision !== mediaRevisionRef.current) return;
 
-        setMirrored(facing === 'user');
+        mirroredRef.current = facing === 'user';
+        setMirrored(mirroredRef.current);
         setVideoPaused(false);
         sourceKindRef.current = 'camera';
         setSourceKind('camera');
       } catch (err) {
+        if (revision !== mediaRevisionRef.current) return;
+        stopActiveMedia();
         console.error('[Camera] Access denied or unavailable:', err);
         setErrorMsg(
           'Could not open webcam. Please allow camera permissions or use "Load Test Footage" to try a clip.',
         );
       }
     },
-    [stopActiveMedia, facingMode],
+    [stopActiveMedia, facingMode, soundEngine],
   );
 
   const handleVideoFileSelect = useCallback(
@@ -395,38 +347,48 @@ export default function App() {
       if (!file) return;
 
       setErrorMsg(null);
-      soundEngineRef.current.unlock();
       stopActiveMedia();
+      soundEngine.unlock();
+      const revision = mediaRevisionRef.current;
+      const video = videoRef.current;
+      if (!video) return;
 
       const url = URL.createObjectURL(file);
       videoUrlRef.current = url;
-      const video = videoRef.current;
-      if (video) {
-        video.srcObject = null;
-        video.src = url;
-        video.loop = true;
-        video.muted = true;
-        try {
-          await video.play();
-          setMirrored(false);
-          setVideoPaused(false);
-          sourceKindRef.current = 'video';
-          setSourceKind('video');
-        } catch (err) {
-          console.error('[Video] Playback failed:', err);
-          setErrorMsg('Could not play this video file in your browser.');
-        }
+      video.src = url;
+      video.loop = true;
+      video.muted = true;
+      try {
+        await video.play();
+        if (revision !== mediaRevisionRef.current) return;
+        mirroredRef.current = false;
+        setMirrored(false);
+        setVideoPaused(false);
+        sourceKindRef.current = 'video';
+        setSourceKind('video');
+      } catch (err) {
+        if (revision !== mediaRevisionRef.current) return;
+        stopActiveMedia();
+        console.error('[Video] Playback failed:', err);
+        setErrorMsg('Could not play this video file in your browser.');
       }
     },
-    [stopActiveMedia],
+    [stopActiveMedia, soundEngine],
   );
 
   const toggleVideoPause = useCallback(() => {
     const video = videoRef.current;
     if (!video || sourceKindRef.current !== 'video') return;
     if (video.paused) {
-      void video.play();
-      setVideoPaused(false);
+      const revision = mediaRevisionRef.current;
+      void video.play().then(
+        () => {
+          if (revision === mediaRevisionRef.current) setVideoPaused(false);
+        },
+        () => {
+          if (revision === mediaRevisionRef.current) setVideoPaused(true);
+        },
+      );
     } else {
       video.pause();
       setVideoPaused(true);
@@ -435,12 +397,11 @@ export default function App() {
 
   // Cleanup camera stream and Web AudioContext on unmount
   useEffect(() => {
-    const sound = soundEngineRef.current;
     return () => {
       stopActiveMedia();
-      sound.dispose();
+      soundEngine.dispose();
     };
-  }, [stopActiveMedia]);
+  }, [stopActiveMedia, soundEngine]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -450,7 +411,7 @@ export default function App() {
       if (key === 'd') setShowHud((v) => !v);
       else if (key === 'm') setMuted((v) => !v);
       else if (key === 's') {
-        soundEngineRef.current.unlock();
+        soundEngine.unlock();
         setSimulateActive((v) => !v);
       } else if (key === 'g') setShowGuide((v) => !v);
       else if (key === ' ' && sourceKindRef.current === 'video') {
@@ -460,18 +421,79 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [toggleVideoPause]);
+  }, [toggleVideoPause, soundEngine]);
 
-  // Main 60fps CV + Anime VFX Render Loop
+  // Advance the effects on display frames and run inference on fresh media frames.
   useEffect(() => {
+    const stageCanvas = stageCanvasRef.current;
+    const compositeCanvas = compositeCanvasRef.current;
+    const fxCanvas = fxCanvasRef.current;
+    const video = videoRef.current;
+    if (!stageCanvas || !compositeCanvas || !fxCanvas || !video) return;
+    const stageCtx = stageCanvas.getContext('2d');
+    const fxCtx = fxCanvas.getContext('2d');
+    if (!stageCtx || !fxCtx) return;
+
+    const fxHooks: AfterglowFrameHooks = {
+      onCharge: (progress) => soundEngine.updateCharge(progress),
+      onChargeEnd: () => soundEngine.endCharge(),
+      onActivate: () => soundEngine.playActivation(),
+      onEcho: (index, pan) => soundEngine.playEcho(index, pan),
+      onStrike: (startPan, endPan) => soundEngine.playBarrageSlice(startPan, endPan),
+      onPunchBurst: (pan, strength) => soundEngine.playPunchBurst(pan, strength),
+      onDissipate: () => soundEngine.playDissipate(),
+    };
+    const mappedPose = {
+      ...INITIAL_POSE,
+      floorAnchor: { ...INITIAL_POSE.floorAnchor },
+      bodyCenter: { ...INITIAL_POSE.bodyCenter },
+      leadWrist: { ...INITIAL_POSE.leadWrist },
+      rearWrist: { ...INITIAL_POSE.rearWrist },
+    };
+
+    let compositor: AfterglowCompositor | null = null;
+    let videoFramePending = true;
+    const useCanvasFallback = (error?: unknown) => {
+      if (error) console.warn('[Afterglow] Using Canvas 2D renderer:', error);
+      compositeCanvas.hidden = true;
+      compositor?.dispose();
+      compositor = null;
+      segmentationEnabledRef.current = false;
+    };
+    const initCompositor = () => {
+      try {
+        compositor = AfterglowCompositor.create(compositeCanvas);
+        segmentationEnabledRef.current = Boolean(compositor);
+        videoFramePending = true;
+      } catch (error) {
+        useCanvasFallback(error);
+      }
+    };
+    const onContextLost = (event: Event) => {
+      event.preventDefault();
+      useCanvasFallback();
+    };
+    initCompositor();
+    compositeCanvas.addEventListener('webglcontextlost', onContextLost);
+    compositeCanvas.addEventListener('webglcontextrestored', initCompositor);
+
     let rafId = 0;
     let lastFrameMs = performance.now();
     let lastInferTimestampMs = 0;
     let lastVideoFrameTime = -1;
+    let mediaRevision = -1;
+    let videoCallbackId = 0;
+    const usesVideoCallbacks = typeof video.requestVideoFrameCallback === 'function';
+    const onVideoFrame = () => {
+      videoFramePending = true;
+      videoCallbackId = video.requestVideoFrameCallback(onVideoFrame);
+    };
+    if (usesVideoCallbacks) videoCallbackId = video.requestVideoFrameCallback(onVideoFrame);
     let smoothedLandmarks: Landmark3D[] | null = null;
     let rawLandmarks: Landmark3D[] | null = null;
     let worldLandmarks: Landmark3D[] | null = null;
     let lastInferenceMs = 0;
+    let lastMaskMs = 0;
     let lastFxRenderMs = 0;
 
     // Pre-allocated mapped landmarks buffer for zero per-frame GC churn
@@ -502,6 +524,13 @@ export default function App() {
         stage.width = sw;
         stage.height = sh;
       }
+      const compositeScale = Math.min(1, MAX_COMPOSITE_SIZE / Math.max(sw, sh, 1));
+      const cw = Math.max(1, Math.round(sw * compositeScale));
+      const ch = Math.max(1, Math.round(sh * compositeScale));
+      if (compositeCanvas.width !== cw || compositeCanvas.height !== ch) {
+        compositeCanvas.width = cw;
+        compositeCanvas.height = ch;
+      }
 
       const fw = Math.floor(window.innerWidth * fxDpr);
       const fh = Math.floor(window.innerHeight * fxDpr);
@@ -527,15 +556,6 @@ export default function App() {
         fpsWindowStart = nowMs;
       }
 
-      const stageCanvas = stageCanvasRef.current;
-      const fxCanvas = fxCanvasRef.current;
-      const video = videoRef.current;
-      if (!stageCanvas || !fxCanvas) return;
-
-      const stageCtx = stageCanvas.getContext('2d');
-      const fxCtx = fxCanvas.getContext('2d');
-      if (!stageCtx || !fxCtx) return;
-
       const sw = stageCanvas.width;
       const sh = stageCanvas.height;
       const fw = fxCanvas.width;
@@ -543,12 +563,27 @@ export default function App() {
 
       const hasVideo =
         sourceKindRef.current !== 'none' &&
-        video &&
         video.readyState >= 2 &&
         video.videoWidth > 0 &&
         video.videoHeight > 0;
 
-      if (!hasVideo) {
+      const mediaChanged = mediaRevision !== mediaRevisionRef.current;
+      if (mediaChanged || video.currentTime + 0.08 < lastVideoFrameTime) {
+        mediaRevision = mediaRevisionRef.current;
+        compositor?.reset();
+        lastVideoFrameTime = -1;
+        videoFramePending = true;
+        if (!mediaChanged) {
+          soundEngine.stopSession();
+          smoother.reset();
+          tracker.reset();
+          fxEngine.reset();
+        }
+        rawLandmarks = smoothedLandmarks = worldLandmarks = null;
+      }
+
+      if (!hasVideo || sw === 0 || sh === 0 || fw === 0 || fh === 0) {
+        compositeCanvas.hidden = true;
         stageCtx.clearRect(0, 0, sw, sh);
         fxCtx.clearRect(0, 0, fw, fh);
         lastVideoFrameTime = -1;
@@ -557,41 +592,50 @@ export default function App() {
 
       // 1. Run MediaPipe PoseLandmarker whenever a fresh video frame arrives
       const landmarker = landmarkerRef.current;
-      if (landmarker && video.currentTime !== lastVideoFrameTime) {
+      const freshVideoFrame = usesVideoCallbacks ? videoFramePending : video.currentTime !== lastVideoFrameTime;
+      if (landmarker && freshVideoFrame) {
+        videoFramePending = false;
         lastVideoFrameTime = video.currentTime;
         const monotonicTs = Math.max(lastInferTimestampMs + 1, Math.round(nowMs));
         lastInferTimestampMs = monotonicTs;
 
         const t0 = performance.now();
         try {
-          const result = landmarker.detectForVideo(video, monotonicTs);
-          lastInferenceMs = performance.now() - t0;
-
-          if (result.landmarks && result.landmarks.length > 0) {
-            rawLandmarks = result.landmarks[0];
-            const rawWorld = result.worldLandmarks?.[0] ?? null;
-
-            smoothedLandmarks = oneEuroRef.current
-              ? smootherRef.current.smooth(rawLandmarks, monotonicTs)
+          landmarker.detectForVideo(video, monotonicTs, (result) => {
+            lastInferenceMs = performance.now() - t0;
+            rawLandmarks = result.landmarks[0] ?? null;
+            const rawWorld = result.worldLandmarks[0] ?? null;
+            smoothedLandmarks = rawLandmarks && oneEuroRef.current
+              ? smoother.smooth(rawLandmarks, monotonicTs)
               : rawLandmarks;
-
-            // Also smooth worldLandmarks using PoseLandmarkSmoother.smoothWorld if present
-            worldLandmarks =
-              oneEuroRef.current && rawWorld && typeof smootherRef.current.smoothWorld === 'function'
-                ? smootherRef.current.smoothWorld(rawWorld, monotonicTs)
-                : rawWorld;
-          } else {
-            rawLandmarks = null;
-            smoothedLandmarks = null;
-            worldLandmarks = null;
-          }
+            worldLandmarks = rawWorld && oneEuroRef.current
+              ? smoother.smoothWorld(rawWorld, monotonicTs)
+              : rawWorld;
+            try {
+              const maskStart = performance.now();
+              const left = rawLandmarks?.[POSE_IDX.LEFT_SHOULDER];
+              const right = rawLandmarks?.[POSE_IDX.RIGHT_SHOULDER];
+              const leftHip = rawLandmarks?.[POSE_IDX.LEFT_HIP];
+              const rightHip = rawLandmarks?.[POSE_IDX.RIGHT_HIP];
+              const torsoX = left && right && leftHip && rightHip
+                ? (left.x + right.x) * 0.32 + (leftHip.x + rightHip.x) * 0.18 : 0.5;
+              const torsoY = left && right && leftHip && rightHip
+                ? (left.y + right.y) * 0.32 + (leftHip.y + rightHip.y) * 0.18 : 0.5;
+              compositor?.updateMask(result.segmentationMasks?.[0], torsoX, torsoY);
+              lastMaskMs = compositor?.hasMask ? performance.now() - maskStart : 0;
+            } catch (error) {
+              useCanvasFallback(error);
+            }
+          });
         } catch {
-          // Ignore transient frame decode errors on video seek/loop
+          // A seek can temporarily fail inference. Drop stale tracking before the next frame.
+          rawLandmarks = smoothedLandmarks = worldLandmarks = null;
+          compositor?.updateMask(undefined);
         }
       }
 
       // 2. Classify Akaza Soryu Pose & advance hysteresis state machine
-      const poseEval = trackerRef.current.update(
+      const poseEval = tracker.update(
         smoothedLandmarks,
         worldLandmarks,
         modeRef.current,
@@ -604,29 +648,11 @@ export default function App() {
       const stageRect = computeViewportRect(video.videoWidth, video.videoHeight, sw, sh, fit);
       const fxRect = computeViewportRect(video.videoWidth, video.videoHeight, fw, fh, fit);
       const isMirrored = mirroredRef.current;
-      const shake = fxEngineRef.current.getShakeOffset();
+      const shake = fxEngine.getShakeOffset();
       const stageShakeX = (shake.x * sw) / fw;
       const stageShakeY = (shake.y * sh) / fh;
 
-      stageCtx.save();
-      stageCtx.fillStyle = '#030509';
-      stageCtx.fillRect(0, 0, sw, sh);
-      stageCtx.translate(stageShakeX, stageShakeY);
-      if (isMirrored) {
-        stageCtx.translate(stageRect.offsetX * 2 + stageRect.drawWidth, 0);
-        stageCtx.scale(-1, 1);
-      }
-      stageCtx.drawImage(
-        video,
-        stageRect.offsetX,
-        stageRect.offsetY,
-        stageRect.drawWidth,
-        stageRect.drawHeight,
-      );
-      stageCtx.restore();
-
       // 4. Remap normalized pose anchors into FX canvas-normalized space (in-place mutation, 0 allocations)
-      const mappedPose = mappedPoseRef.current;
       mappedPose.hasPerson = poseEval.hasPerson;
       mappedPose.resolvedMode = poseEval.resolvedMode;
       mappedPose.stanceSide = poseEval.stanceSide;
@@ -676,7 +702,14 @@ export default function App() {
 
       // 5. Render layered Anime Blue Silver Chaotic Afterglow VFX
       const fxT0 = performance.now();
-      fxEngineRef.current.render(
+      const depthActive = poseEval.state !== 'IDLE';
+      let rear: CanvasRenderingContext2D | undefined;
+      try {
+        if (depthActive) rear = compositor?.getRearContext(fw, fh);
+      } catch (error) {
+        useCanvasFallback(error);
+      }
+      fxEngine.render(
         fxCtx,
         fw,
         fh,
@@ -684,11 +717,43 @@ export default function App() {
         mappedPose,
         mappedLandmarks,
         false,
-        fxHooksRef.current,
+        fxHooks,
+        rear,
+        compositor?.hasMask,
       );
+      let composited = false;
+      if (rear && compositor) {
+        try {
+          const { width, height } = compositeCanvas;
+          const rect = computeViewportRect(video.videoWidth, video.videoHeight, width, height, fit);
+          composited = compositor.render(
+            video, rect, shake.x * width / fw, shake.y * height / fh, isMirrored, fxEngine.scene,
+            poseEval.floorAnchor, poseEval.state !== 'DISSIPATING',
+          );
+        } catch (error) {
+          useCanvasFallback(error);
+        }
+      } else if (!depthActive) {
+        compositor?.clearEchoHistory();
+      }
+      compositeCanvas.hidden = !composited;
+      if (!composited) {
+        stageCtx.save();
+        stageCtx.fillStyle = '#030509';
+        stageCtx.fillRect(0, 0, sw, sh);
+        stageCtx.translate(stageShakeX, stageShakeY);
+        if (isMirrored) {
+          stageCtx.translate(stageRect.offsetX * 2 + stageRect.drawWidth, 0);
+          stageCtx.scale(-1, 1);
+        }
+        stageCtx.drawImage(video, stageRect.offsetX, stageRect.offsetY, stageRect.drawWidth, stageRect.drawHeight);
+        stageCtx.restore();
+      }
 
       // 6. Optional CV Debug Skeleton overlay
       if (showHudRef.current) {
+        fxRect.offsetX += shake.x;
+        fxRect.offsetY += shake.y;
         drawDebugSkeleton(fxCtx, smoothedLandmarks, rawLandmarks, poseEval, fxRect, isMirrored);
       }
       lastFxRenderMs = performance.now() - fxT0;
@@ -699,9 +764,11 @@ export default function App() {
         setTelemetry({
           fps: currentFps,
           inferenceMs: lastInferenceMs,
+          maskMs: lastMaskMs,
           fxRenderMs: lastFxRenderMs,
           pose: poseEval,
           engineInfo: engineInfoRef.current,
+          renderer: compositor ? (compositor.hasMask ? 'WebGL 2 · Person matte' : 'WebGL 2 · Awaiting matte') : 'Canvas 2D',
         });
       }
     };
@@ -709,7 +776,44 @@ export default function App() {
     rafId = requestAnimationFrame(frame);
     return () => {
       cancelAnimationFrame(rafId);
+      if (usesVideoCallbacks) video.cancelVideoFrameCallback(videoCallbackId);
       window.removeEventListener('resize', resizeCanvases);
+      compositeCanvas.removeEventListener('webglcontextlost', onContextLost);
+      compositeCanvas.removeEventListener('webglcontextrestored', initCompositor);
+      useCanvasFallback();
+    };
+  }, [fxEngine, smoother, soundEngine, tracker]);
+
+  // Initialize MediaPipe PoseLandmarker on mount
+  useEffect(() => {
+    let cancelled = false;
+
+    const initialize = async () => {
+      if (cancelled) return;
+      try {
+        const { landmarker, info } = await createPoseEngine(segmentationEnabledRef.current);
+        if (cancelled) {
+          landmarker.close();
+          return;
+        }
+        landmarkerRef.current = landmarker;
+        engineInfoRef.current = info;
+        setEngineInfo(info);
+        setModelStatus('ready');
+      } catch (err) {
+        if (cancelled) return;
+        console.error('[PoseEngine] Failed to load:', err);
+        setModelStatus('error');
+        setErrorMsg('Failed to load MediaPipe Pose model. Check your internet connection.');
+      }
+    };
+    // Strict Mode can replay mount effects before the first model request starts.
+    queueMicrotask(() => void initialize());
+
+    return () => {
+      cancelled = true;
+      landmarkerRef.current?.close();
+      landmarkerRef.current = null;
     };
   }, []);
 
@@ -729,8 +833,9 @@ export default function App() {
 
       {/* Base camera/video canvas */}
       <canvas ref={stageCanvasRef} className="absolute inset-0 h-full w-full" />
+      <canvas ref={compositeCanvasRef} hidden className="pointer-events-none absolute inset-0 h-full w-full" />
 
-      {/* 60fps Anime VFX + Debug Skeleton canvas */}
+      {/* Foreground effects and optional debug skeleton */}
       <canvas ref={fxCanvasRef} className="pointer-events-none absolute inset-0 h-full w-full" />
 
       {/* Unified non-intrusive top broadcast rail */}
@@ -892,7 +997,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
-              soundEngineRef.current.unlock();
+              soundEngine.unlock();
               setSimulateActive((v) => !v);
             }}
             title="Preview effect manually (S)"
@@ -963,7 +1068,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
-              soundEngineRef.current.unlock();
+              soundEngine.unlock();
               setMuted((v) => !v);
             }}
             title="Mute sound FX (M)"

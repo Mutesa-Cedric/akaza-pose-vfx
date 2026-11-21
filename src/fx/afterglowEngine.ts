@@ -1,11 +1,15 @@
 import type { Landmark3D } from '../cv/oneEuroFilter';
 import type { PoseEvaluation, PoseState, Vec2 } from '../cv/akazaPoseClassifier';
 import { drawSnowflakeCompass } from './compassRenderer';
+import type { AfterglowScene } from './afterglowCompositor';
 
 export interface AfterglowFrameHooks {
+  onCharge?: (progress: number) => void;
+  onChargeEnd?: () => void;
   onActivate?: () => void;
-  onPunchBurst?: () => void;
-  onBarrageTick?: () => void;
+  onEcho?: (index: number, pan: number) => void;
+  onPunchBurst?: (pan: number, strength: number) => void;
+  onStrike?: (startPan: number, endPan: number) => void;
   onDissipate?: () => void;
 }
 
@@ -21,6 +25,7 @@ interface ChaoticNeedle {
   thickness: number;
   palette: 'cyan' | 'silver' | 'violet' | 'crimson';
   isHero: boolean;
+  behind: boolean;
 }
 
 interface PlasmaRing {
@@ -33,6 +38,8 @@ interface PlasmaRing {
   lineWidth: number;
   tiltY: number;
   color: string;
+  angle?: number;
+  behind?: boolean;
 }
 
 interface KoyukiParticle {
@@ -49,6 +56,12 @@ interface KoyukiParticle {
 }
 
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+const ECHO_ENTRANCES = [
+  { slot: 1, start: 0.07, pan: -0.52 },
+  { slot: 2, start: 0.17, pan: 0.52 },
+  { slot: 0, start: 0.28, pan: -0.89 },
+  { slot: 3, start: 0.39, pan: 0.89 },
+];
 
 /** O(1) swap-remove helper to avoid GC array shifting */
 function swapRemove<T>(arr: T[], index: number): void {
@@ -284,7 +297,7 @@ if (typeof document !== 'undefined') {
  * Akaza's Destructive Death – Final Form: Blue Silver Chaotic Afterglow
  * (破壊殺・終式 青銀乱残光)
  *
- * Back-to-Front Compositing Stack (Zero per-frame shadowBlur, locked 60fps):
+ * Back-to-front compositing order:
  *  1. 2-Frame Anime Impact Beat (cyan/crimson lateral rim split + micro camera shake)
  *  2. Midnight Indigo Domain Grade & Vignette
  *  3. 3D Floor Snowflake Compass (via drawSnowflakeCompass)
@@ -305,11 +318,25 @@ export class AfterglowFxEngine {
   private needleSpawnAcc = 0;
   private fireworkSpawnAcc = 0;
   private punchCooldown = 0;
-  private soundTickAcc = 0;
+  private strikeCooldown = 0;
+  private echoTime = 0;
+  private nextEchoCue = 0;
 
   // 2-Frame Anime Impact Beat state
   private impactBeatFrames = 0;
   private impactFlashAlpha = 0;
+  readonly scene: AfterglowScene = {
+    time: 0,
+    intensity: 0,
+    floor: { x: 0.5, y: 0.85 },
+    center: { x: 0.5, y: 0.5 },
+    compassRadius: 0,
+    compassOpacity: 0,
+    echoReveals: new Float32Array(ECHO_ENTRANCES.length),
+    shockOrigin: { x: 0.5, y: 0.5 },
+    shockAge: 1,
+    shockStrength: 0,
+  };
 
   // Smoothly interpolated anchors
   private smoothFloor: Vec2 = { x: 0.5, y: 0.85 };
@@ -350,6 +377,12 @@ export class AfterglowFxEngine {
     this.impactFlashAlpha = 0;
     this.shakeMagnitude = 0;
     this.anchorsInitialized = false;
+    this.needleSpawnAcc = 0;
+    this.fireworkSpawnAcc = 0;
+    this.strikeCooldown = 0;
+    this.punchCooldown = 0;
+    this.resetEchoes();
+    this.scene.shockAge = 1;
   }
 
   getShakeOffset(): Vec2 {
@@ -372,16 +405,20 @@ export class AfterglowFxEngine {
     landmarks: Landmark3D[] | null,
     mirrored: boolean,
     hooks?: AfterglowFrameHooks,
+    rear?: CanvasRenderingContext2D,
+    hasMatte = false,
   ): void {
     const dt = Math.min(0.05, Math.max(0.001, dtSec));
     this.timeSec += dt;
     this.punchCooldown = Math.max(0, this.punchCooldown - dt);
+    this.strikeCooldown = Math.max(0, this.strikeCooldown - dt);
+    this.scene.shockAge = Math.min(1, this.scene.shockAge + dt / 0.56);
 
     const mapX = (nx: number) => (mirrored ? 1 - nx : nx) * width;
     const mapY = (ny: number) => ny * height;
 
     // Smooth anchor interpolation
-    if (!this.anchorsInitialized && pose.hasPerson) {
+    if (!this.anchorsInitialized) {
       this.smoothFloor.x = pose.floorAnchor.x;
       this.smoothFloor.y = pose.floorAnchor.y;
       this.smoothCenter.x = pose.bodyCenter.x;
@@ -415,10 +452,17 @@ export class AfterglowFxEngine {
     // -------------------------------------------------------------------------
     // State Transitions & Triggers
     // -------------------------------------------------------------------------
+    if (pose.state === 'CHARGING') {
+      hooks?.onCharge?.(pose.chargeProgress);
+    } else if (this.prevState === 'CHARGING') {
+      hooks?.onChargeEnd?.();
+    }
     if (this.prevState !== 'ACTIVE' && pose.state === 'ACTIVE') {
+      this.resetEchoes();
       this.impactBeatFrames = 2;
       this.impactFlashAlpha = 0.85;
       this.shakeMagnitude = 12.0;
+      this.startShock(centerPx, width, height, 1);
       this.spawnActivationBlast(centerPx, floorPx, minDim);
       hooks?.onActivate?.();
     } else if (this.prevState === 'ACTIVE' && pose.state === 'DISSIPATING') {
@@ -431,8 +475,9 @@ export class AfterglowFxEngine {
       this.punchCooldown = 0.22;
       this.impactBeatFrames = 2;
       this.shakeMagnitude = Math.max(this.shakeMagnitude, 6.0);
+      this.startShock(leadWristPx, width, height, 0.65);
       this.spawnPunchShockwave(leadWristPx, centerPx, minDim);
-      hooks?.onPunchBurst?.();
+      hooks?.onPunchBurst?.(2 * leadWristPx.x / width - 1, Math.min(1, pose.wristSpeed / 2.5));
     }
 
     // -------------------------------------------------------------------------
@@ -459,12 +504,18 @@ export class AfterglowFxEngine {
 
     if (pose.state === 'ACTIVE') {
       const escalation = Math.min(1, 0.45 + pose.activeDurationSec * 0.4);
+      if (rear && hasMatte) this.revealEchoes(dt, centerPx.x / width, hooks);
 
       // 100-strike chaotic needle barrage
-      this.needleSpawnAcc += dt * (22 + escalation * 28);
+      const ramp = rear ? Math.min(1, 0.20 + pose.activeDurationSec * 2.4) : 1;
+      this.needleSpawnAcc += dt * (22 + escalation * 28) * ramp;
       while (this.needleSpawnAcc >= 1) {
         this.needleSpawnAcc -= 1;
-        this.spawnChaoticNeedle(width, height, centerPx, minDim);
+        const strike = this.spawnChaoticNeedle(width, height, centerPx, minDim);
+        if (strike.isHero && !strike.behind && this.strikeCooldown <= 0 && pose.activeDurationSec > 0.54) {
+          this.strikeCooldown = 0.19;
+          hooks?.onStrike?.(2 * strike.x0 / width - 1, 2 * strike.x1 / width - 1);
+        }
       }
 
       // Koyuki firework starbursts
@@ -504,11 +555,6 @@ export class AfterglowFxEngine {
         });
       }
 
-      this.soundTickAcc += dt;
-      if (this.soundTickAcc >= 0.28) {
-        this.soundTickAcc = 0;
-        hooks?.onBarrageTick?.();
-      }
     }
 
     // Decay impact & shake
@@ -519,10 +565,12 @@ export class AfterglowFxEngine {
     this.updateParticles(dt);
 
     // -------------------------------------------------------------------------
-    // BACK-TO-FRONT COMPOSITING STACK (Locked 60fps, Zero per-frame shadowBlur)
+    // Back-to-front compositing
     // -------------------------------------------------------------------------
     ctx.clearRect(0, 0, width, height);
+    rear?.clearRect(0, 0, width, height);
     const intensity = pose.effectIntensity;
+    this.scene.intensity = intensity;
 
     if (
       intensity <= 0.005 &&
@@ -541,7 +589,7 @@ export class AfterglowFxEngine {
     }
 
     // Stack Layer 2: Midnight Indigo Domain Grade & Vignette
-    if (intensity > 0.01) {
+    if (!rear && intensity > 0.01) {
       this.drawDomainGrade(ctx, width, height, centerPx, intensity);
     }
 
@@ -554,19 +602,34 @@ export class AfterglowFxEngine {
           ? Math.min(1, 0.35 + pose.activeDurationSec * 2.8)
           : intensity;
 
-    drawSnowflakeCompass({
-      ctx,
-      cx: floorPx.x,
-      cy: floorPx.y,
-      radius: compassRadius,
-      unfold,
-      intensity: Math.max(intensity, pose.state === 'CHARGING' ? pose.chargeProgress * 0.35 : 0),
-      timeSec: this.timeSec,
-      activeTime: pose.activeDurationSec,
-    });
+    const compassOpacity = Math.max(intensity, pose.state === 'CHARGING' ? pose.chargeProgress * 0.42 : 0);
+    if (rear) {
+      const scene = this.scene;
+      scene.time = this.timeSec;
+      scene.center.x = centerPx.x / width;
+      scene.center.y = centerPx.y / height;
+      scene.floor.x = floorPx.x / width;
+      scene.floor.y = floorPx.y / height;
+      const open = pose.state === 'DISSIPATING' ? 1 : unfold;
+      scene.compassRadius = compassRadius / minDim * (0.18 + open * 0.82);
+      scene.compassOpacity = compassOpacity * (0.90 + 0.10 * Math.sin(this.timeSec * 5.2));
+      this.drawPlasmaRings(rear, true);
+      this.drawChaoticNeedles(rear, true);
+    } else {
+      drawSnowflakeCompass({
+        ctx,
+        cx: floorPx.x,
+        cy: floorPx.y,
+        radius: compassRadius,
+        unfold,
+        intensity: compassOpacity,
+        timeSec: this.timeSec,
+        activeTime: pose.activeDurationSec,
+      });
+    }
 
     // Stack Layer 4: Face-Safe Volumetric Aura Wisps (strictly below collarbone)
-    if (intensity > 0.04 && pose.hasPerson) {
+    if (!rear && intensity > 0.04 && pose.hasPerson) {
       this.drawFaceSafeAuraWisps(ctx, landmarks, centerPx, minDim, intensity, mapY, mirrored, width);
     }
 
@@ -576,8 +639,8 @@ export class AfterglowFxEngine {
     }
 
     // Stack Layer 6: Plasma Rings & 100-Strike Razor-Needle Chaotic Barrage
-    this.drawPlasmaRings(ctx);
-    this.drawChaoticNeedles(ctx);
+    this.drawPlasmaRings(ctx, rear ? false : undefined);
+    this.drawChaoticNeedles(ctx, rear ? false : undefined);
 
     // Stack Layer 7: Koyuki Firework Starbursts & Embers
     this.drawKoyukiParticles(ctx);
@@ -588,7 +651,7 @@ export class AfterglowFxEngine {
     }
 
     // Subtle Flash Overlay on Beat
-    if (this.impactFlashAlpha > 0.02) {
+    if (!rear && this.impactFlashAlpha > 0.02) {
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
       ctx.fillStyle = `rgba(240, 249, 255, ${this.impactFlashAlpha * 0.5})`;
@@ -596,10 +659,64 @@ export class AfterglowFxEngine {
       ctx.restore();
     }
 
+    if (rear && landmarks) this.protectFace(ctx, width, height, landmarks, mirrored);
+
     // Calligraphy Banner ("破壊殺・終式 青銀亂殘光")
-    if (intensity > 0.08 && pose.state !== 'CHARGING') {
-      this.drawCalligraphyBanner(ctx, width, height, intensity, pose.activeDurationSec);
+    const titleFade = rear ? Math.max(0, Math.min(1, (1.95 - pose.activeDurationSec) / 0.62)) : 1;
+    if (intensity * titleFade > 0.08 && pose.state !== 'CHARGING') {
+      this.drawCalligraphyBanner(ctx, width, height, intensity * titleFade, pose.activeDurationSec);
     }
+  }
+
+  private resetEchoes(): void {
+    this.echoTime = 0;
+    this.nextEchoCue = 0;
+    this.scene.echoReveals.fill(0);
+  }
+
+  private revealEchoes(dt: number, centerX: number, hooks?: AfterglowFrameHooks): void {
+    this.echoTime += dt;
+    for (let i = 0; i < ECHO_ENTRANCES.length; i++) {
+      const { slot, start, pan } = ECHO_ENTRANCES[i];
+      const progress = Math.max(0, Math.min(1, (this.echoTime - start) / 0.18));
+      const visible = 1 - (1 - progress) ** 3;
+      this.scene.echoReveals[slot] = visible;
+      if (this.nextEchoCue === i && visible >= 0.26) {
+        this.nextEchoCue++;
+        hooks?.onEcho?.(i, pan + (centerX - 0.5) * 0.46);
+      }
+    }
+  }
+
+  private startShock(origin: Vec2, width: number, height: number, strength: number): void {
+    this.scene.shockOrigin.x = origin.x / width;
+    this.scene.shockOrigin.y = origin.y / height;
+    this.scene.shockAge = 0;
+    this.scene.shockStrength = strength;
+  }
+
+  private protectFace(
+    ctx: CanvasRenderingContext2D, width: number, height: number, landmarks: Landmark3D[], mirrored: boolean,
+  ): void {
+    const nose = landmarks[0];
+    const leftShoulder = landmarks[11];
+    const rightShoulder = landmarks[12];
+    if (!nose || (nose.visibility ?? 1) < 0.4 || !leftShoulder || !rightShoulder) return;
+    const shoulderWidth = Math.hypot(
+      (leftShoulder.x - rightShoulder.x) * width,
+      (leftShoulder.y - rightShoulder.y) * height,
+    );
+    const radius = Math.max(10, shoulderWidth * 0.37);
+    ctx.save();
+    ctx.translate((mirrored ? 1 - nose.x : nose.x) * width, nose.y * height - radius * 0.12);
+    ctx.scale(1, 1.21);
+    const fade = ctx.createRadialGradient(0, 0, radius * 0.53, 0, 0, radius);
+    fade.addColorStop(0, '#fff');
+    fade.addColorStop(1, '#fff0');
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillStyle = fade;
+    ctx.fillRect(-radius, -radius, radius * 2, radius * 2);
+    ctx.restore();
   }
 
   // ---------------------------------------------------------------------------
@@ -824,18 +941,20 @@ export class AfterglowFxEngine {
   // ---------------------------------------------------------------------------
   // Layer 6: Plasma Rings & 100-Strike Razor-Needle Chaotic Barrage
   // ---------------------------------------------------------------------------
-  private drawPlasmaRings(ctx: CanvasRenderingContext2D): void {
+  private drawPlasmaRings(ctx: CanvasRenderingContext2D, behind?: boolean): void {
     if (this.rings.length === 0) return;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
 
     for (const r of this.rings) {
+      if (behind !== undefined && Boolean(r.behind) !== behind) continue;
       const t = r.age / r.life;
       const alpha = (1 - t) * (1 - t);
       const w = Math.max(1, r.lineWidth * (1 - t * 0.65));
 
       ctx.save();
       ctx.translate(r.x, r.y);
+      if (r.angle !== undefined) ctx.rotate(r.angle);
       ctx.scale(1, r.tiltY);
       ctx.beginPath();
       ctx.arc(0, 0, r.radius, 0, Math.PI * 2);
@@ -855,13 +974,14 @@ export class AfterglowFxEngine {
     ctx.restore();
   }
 
-  private drawChaoticNeedles(ctx: CanvasRenderingContext2D): void {
+  private drawChaoticNeedles(ctx: CanvasRenderingContext2D, behind?: boolean): void {
     if (this.needles.length === 0) return;
     const needleSprite = getNeedleSprite();
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
 
     for (const n of this.needles) {
+      if (behind !== undefined && n.behind !== behind) continue;
       const t = n.age / n.life;
       const alpha = t < 0.16 ? t / 0.16 : Math.pow(1 - (t - 0.16) / 0.84, 1.5);
       if (alpha <= 0.01) continue;
@@ -1126,6 +1246,7 @@ export class AfterglowFxEngine {
       lineWidth: 5.5,
       tiltY: 0.28,
       color: 'rgb(56, 189, 248)',
+      behind: true,
     });
     this.rings.push({
       x: center.x,
@@ -1137,6 +1258,7 @@ export class AfterglowFxEngine {
       lineWidth: 4.8,
       tiltY: 1,
       color: 'rgb(124, 58, 237)',
+      behind: true,
     });
 
     for (let i = 0; i < 22; i++) {
@@ -1145,7 +1267,7 @@ export class AfterglowFxEngine {
     this.spawnKoyukiStarburst(center.x, center.y, minDim * 0.42, 38);
   }
 
-  private spawnPunchShockwave(leadWrist: Vec2, _center: Vec2, minDim: number): void {
+  private spawnPunchShockwave(leadWrist: Vec2, center: Vec2, minDim: number): void {
     this.rings.push({
       x: leadWrist.x,
       y: leadWrist.y,
@@ -1154,7 +1276,8 @@ export class AfterglowFxEngine {
       age: 0,
       life: 0.36,
       lineWidth: 4.2,
-      tiltY: 1,
+      tiltY: 0.54,
+      angle: Math.atan2(leadWrist.y - center.y, leadWrist.x - center.x) + Math.PI * 0.5,
       color: 'rgb(0, 240, 255)',
     });
     this.spawnKoyukiStarburst(leadWrist.x, leadWrist.y, minDim * 0.26, 18);
@@ -1163,7 +1286,7 @@ export class AfterglowFxEngine {
     }
   }
 
-  private spawnChaoticNeedle(width: number, height: number, center: Vec2, minDim: number): void {
+  private spawnChaoticNeedle(width: number, height: number, center: Vec2, minDim: number): ChaoticNeedle {
     const isRadial = Math.random() < 0.62;
     let x0: number, y0: number, x1: number, y1: number;
 
@@ -1193,7 +1316,7 @@ export class AfterglowFxEngine {
     const palette: ChaoticNeedle['palette'] =
       r < 0.48 ? 'cyan' : r < 0.78 ? 'silver' : r < 0.95 ? 'violet' : 'crimson';
 
-    this.needles.push({
+    const needle: ChaoticNeedle = {
       x0,
       y0,
       x1,
@@ -1205,7 +1328,10 @@ export class AfterglowFxEngine {
       thickness: 1.6 + Math.random() * 3.6,
       palette,
       isHero: Math.random() < 0.35,
-    });
+      behind: Math.random() < 0.68,
+    };
+    this.needles.push(needle);
+    return needle;
   }
 
   private spawnKoyukiStarburst(x: number, y: number, speedScale: number, count: number): void {
@@ -1269,7 +1395,7 @@ export class AfterglowFxEngine {
       }
     }
 
-    // Strict pool upper limits for locked 60fps & < 3.0ms render time
+    // Bound particle counts during sustained activation.
     if (this.needles.length > 95) this.needles.length = 95;
     if (this.particles.length > 220) this.particles.length = 220;
     if (this.rings.length > 20) this.rings.length = 20;
