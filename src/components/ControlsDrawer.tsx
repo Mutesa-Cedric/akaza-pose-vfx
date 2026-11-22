@@ -150,8 +150,8 @@ export function ControlsDrawer({
         <HairlineSlider
           label="LOCK GATE"
           display={`${Math.round(entryThreshold * 100)}%`}
-          min={0.58}
-          max={0.86}
+          min={0.52}
+          max={0.84}
           step={0.01}
           value={entryThreshold}
           onChange={onChangeEntryThreshold}

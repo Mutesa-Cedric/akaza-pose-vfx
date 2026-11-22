@@ -14,9 +14,9 @@ export type TriggerMode = 'hold' | 'burst';
 export type StrictnessPreset = 'relaxed' | 'balanced' | 'strict';
 
 export const STRICTNESS_THRESHOLDS: Record<StrictnessPreset, number> = {
-  relaxed: 0.64,
-  balanced: 0.74,
-  strict: 0.82,
+  relaxed: 0.58,
+  balanced: 0.68,
+  strict: 0.78,
 };
 
 export interface PoseTrackerConfig {
@@ -123,14 +123,14 @@ function isVisible(lm: Landmark3D | undefined, threshold = 0.35): boolean {
   return Boolean(lm && (lm.visibility ?? 1) >= threshold && lm.y >= 0.01 && lm.y <= 0.99);
 }
 
-function isInFrame(lm: Landmark3D | undefined, threshold = 0.5): boolean {
+function isInFrame(lm: Landmark3D | undefined, threshold = 0.42): boolean {
   return Boolean(
     lm &&
       (lm.visibility ?? 1) >= threshold &&
-      lm.x >= 0.02 &&
-      lm.x <= 0.98 &&
-      lm.y >= 0.03 &&
-      lm.y <= 0.94,
+      lm.x >= 0.01 &&
+      lm.x <= 0.99 &&
+      lm.y >= 0.02 &&
+      lm.y <= 0.97,
   );
 }
 
@@ -157,14 +157,15 @@ export class AkazaPoseTracker {
   private entryThreshold = DEFAULT_TRACKER_CONFIG.entryThreshold;
   private triggerMode: TriggerMode = DEFAULT_TRACKER_CONFIG.triggerMode;
   private burstDurationSec = DEFAULT_TRACKER_CONFIG.burstDurationSec;
-  private readonly CHARGE_DURATION_SEC = 0.30;
-  private readonly RELEASE_GRACE_SEC = 0.34;
-  private readonly DISSIPATE_RATE = 2.4; // fades out in ~0.42s
+  private readonly CHARGE_DURATION_SEC = 0.24;
+  private readonly MIN_ACTIVE_HOLD_SEC = 1.25;
+  private readonly RELEASE_GRACE_SEC = 0.55;
+  private readonly DISSIPATE_RATE = 2.2; // fades out smoothly in ~0.45s
   private readonly SWITCH_MARGIN = 0.14;
 
   setConfig(config: Partial<PoseTrackerConfig>): void {
     if (config.entryThreshold !== undefined) {
-      this.entryThreshold = clamp(config.entryThreshold, 0.55, 0.88);
+      this.entryThreshold = clamp(config.entryThreshold, 0.50, 0.86);
     }
     if (config.triggerMode !== undefined) {
       this.triggerMode = config.triggerMode;
@@ -474,37 +475,31 @@ export class AkazaPoseTracker {
       const rearHeightScore =
         smoothstep(-0.22, 0.08, rearHeight) * (1 - smoothstep(0.46, 0.72, rearHeight));
 
-      // Rear elbow MUST be actively flexed (rejects hanging limp arms >= 158 deg)
+      // Rear elbow MUST be actively flexed (rejects hanging limp arms >= 165 deg while tolerating
+      // real BlazePose 140..150 deg readings during natural Soryu chambering).
       const rearElbowAngle =
         wRearSh && wRearEl && wRearWr
           ? angle3D(wRearSh, wRearEl, wRearWr)
           : angle3D(rearSh, rearEl, rearWr);
       const rearChamberBend =
-        smoothstep(32, 62, rearElbowAngle) * (1 - smoothstep(138, 162, rearElbowAngle));
+        smoothstep(30, 58, rearElbowAngle) * (1 - smoothstep(146, 168, rearElbowAngle));
 
-      // In upper-body (desk) mode, reject a rear hand resting far forward on a keyboard/desk.
-      // In full-body mode, BlazePose monocular z naturally places a chambered hip fist ahead of
-      // the pelvis center, while lower-body horse-stance + squat gates already reject desk sitting.
-      let deskRestGuard = 1;
+      // Gentle elbow retraction check (BlazePose monocular z is noisy on wrists/elbows, so avoid
+      // hard z cutoffs that false-reject genuine real-webcam stances).
       let rearRetractGuard = 1;
       if (wRearWr && wRearEl && torsoLen3D > 1e-4) {
-        if (resolvedMode === 'upper-body') {
-          const rearForward3D = (wHipMid.z - wRearWr.z) / torsoLen3D;
-          deskRestGuard = 1 - smoothstep(0.50, 0.86, rearForward3D);
-        }
         const elbowBack3D = (wRearEl.z - wRearWr.z) / torsoLen3D;
-        rearRetractGuard = smoothstep(-0.24, 0.04, elbowBack3D);
+        rearRetractGuard = smoothstep(-0.36, -0.02, elbowBack3D);
       }
 
       // Reject rear hand crossed over onto the opposite side of the torso
       const rearSideSign = Math.sign(rearSh.x - shMid.x) || -1;
       const rearSideOffset = ((rearWr.x - shMid.x) * rearSideSign) / shoulderWidth;
-      const rearMidlineGuard = smoothstep(-0.18, 0.14, rearSideOffset);
+      const rearMidlineGuard = smoothstep(-0.18, 0.12, rearSideOffset);
 
       const rearArmChamber = clamp01(
         rearHeightScore *
-          (0.28 + 0.72 * rearChamberBend) *
-          deskRestGuard *
+          (0.30 + 0.70 * rearChamberBend) *
           rearRetractGuard *
           rearMidlineGuard,
       );
@@ -590,12 +585,12 @@ export class AkazaPoseTracker {
         const widthRatio3D = sep3D / Math.max(1e-4, shoulderWidth3D);
         widthRatio = Math.max(widthRatio2D, widthRatio3D);
       }
-      stanceWidth = smoothstep(1.24, 1.80, widthRatio);
+      stanceWidth = smoothstep(1.18, 1.68, widthRatio);
 
-      // 2D hip-to-knee drop: standing ~0.64, crouched ~0.12..0.40
+      // 2D hip-to-knee drop: standing ~0.64, crouched ~0.12..0.42
       const kneeMidY = (lKnee.y + rKnee.y) * 0.5;
       const hipToKneeRatio = (kneeMidY - hipMid.y) / torsoHeight;
-      const squat2D = 1 - smoothstep(0.24, 0.54, hipToKneeRatio);
+      const squat2D = 1 - smoothstep(0.24, 0.56, hipToKneeRatio);
 
       // 3D BOTH-knees flexion angle: require both legs bent (prevents single-knee weight shift cheat)
       let squat3D = squat2D;
@@ -613,10 +608,10 @@ export class AkazaPoseTracker {
         );
         const maxKneeAngle = Math.max(lKneeAngle, rKneeAngle);
         const avgKneeAngle = (lKneeAngle + rKneeAngle) * 0.5;
-        bothBentGate = 1 - smoothstep(154, 170, maxKneeAngle);
+        bothBentGate = 1 - smoothstep(158, 174, maxKneeAngle);
         squat3D =
-          (1 - smoothstep(112, 152, avgKneeAngle)) *
-          (1 - smoothstep(138, 166, maxKneeAngle));
+          (1 - smoothstep(118, 156, avgKneeAngle)) *
+          (1 - smoothstep(144, 170, maxKneeAngle));
       }
 
       squatDepth = clamp01(Math.max(squat2D * bothBentGate, squat3D * 0.96));
@@ -650,18 +645,17 @@ export class AkazaPoseTracker {
       const gate = Math.sqrt(lowerScore * upperScore);
       rawConfidence = clamp01(weighted * 0.30 + gate * 0.70);
     } else {
-      // Desk / Upper-Body mode: require both wrists & elbows cleanly in frame (no hidden/cropped limbs)
+      // Desk / Upper-Body mode: require both wrists & elbows in frame, without forcing hips inside
+      // laptop webcam bounds (hips naturally sit below the bottom edge when seated at a desk).
       const upperClean =
-        isInFrame(lWr, 0.50) &&
-        isInFrame(rWr, 0.50) &&
-        isInFrame(lEl, 0.48) &&
-        isInFrame(rEl, 0.48) &&
-        isVisible(lHip, 0.35) &&
-        isVisible(rHip, 0.35);
+        isInFrame(lWr, 0.42) &&
+        isInFrame(rWr, 0.42) &&
+        isInFrame(lEl, 0.42) &&
+        isInFrame(rEl, 0.42);
       const elbowsSpread = Math.abs(lEl.x - rEl.x) / bodyScale;
-      const readinessBonus = smoothstep(1.12, 1.58, elbowsSpread);
+      const readinessBonus = smoothstep(1.12, 1.56, elbowsSpread);
       rawConfidence = upperClean
-        ? clamp01(armEval.combinedArm * (0.84 + 0.16 * readinessBonus) * 0.95)
+        ? clamp01(armEval.combinedArm * (0.80 + 0.20 * readinessBonus) * 0.94)
         : 0;
       stanceWidth = readinessBonus;
       squatDepth = armEval.armAsymmetry;
@@ -710,7 +704,9 @@ export class AkazaPoseTracker {
 
   private stepStateMachine(confidence: number, dtSec: number): void {
     const entry = this.entryThreshold;
-    const sustain = clamp(entry - 0.18, 0.42, 0.74);
+    // Forgiving charge & sustain floors prevent mid-hook aborts from brief MediaPipe jitter.
+    const chargeHold = entry * 0.78;
+    const sustain = clamp(entry - 0.24, 0.36, 0.65);
 
     switch (this.state) {
       case 'IDLE': {
@@ -724,7 +720,7 @@ export class AkazaPoseTracker {
         break;
       }
       case 'CHARGING': {
-        if (confidence >= entry * 0.92) {
+        if (confidence >= chargeHold) {
           this.chargeElapsedSec += dtSec;
           this.effectIntensity = Math.max(
             this.effectIntensity,
@@ -734,11 +730,12 @@ export class AkazaPoseTracker {
             this.state = 'ACTIVE';
             this.activeElapsedSec = 0;
             this.releaseElapsedSec = 0;
-            this.burstRemainingSec = this.triggerMode === 'burst' ? this.burstDurationSec : 0;
+            this.burstRemainingSec =
+              this.triggerMode === 'burst' ? this.burstDurationSec : this.MIN_ACTIVE_HOLD_SEC;
           }
         } else {
-          this.chargeElapsedSec = Math.max(0, this.chargeElapsedSec - dtSec * 2.5);
-          this.effectIntensity = Math.max(0, this.effectIntensity - dtSec * 2.0);
+          this.chargeElapsedSec = Math.max(0, this.chargeElapsedSec - dtSec * 0.85);
+          this.effectIntensity = Math.max(0, this.effectIntensity - dtSec * 1.4);
           if (this.chargeElapsedSec <= 0) {
             this.state = 'IDLE';
           }
@@ -762,10 +759,11 @@ export class AkazaPoseTracker {
         break;
       }
       case 'DISSIPATING': {
-        if (confidence >= entry) {
+        if (confidence >= entry * 0.92) {
           this.state = 'ACTIVE';
           this.releaseElapsedSec = 0;
-          this.burstRemainingSec = this.triggerMode === 'burst' ? this.burstDurationSec : 0;
+          this.burstRemainingSec =
+            this.triggerMode === 'burst' ? this.burstDurationSec : this.MIN_ACTIVE_HOLD_SEC;
           break;
         }
         this.effectIntensity = Math.max(0, this.effectIntensity - dtSec * this.DISSIPATE_RATE);

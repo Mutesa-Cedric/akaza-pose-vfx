@@ -17,7 +17,7 @@ Strike Akaza's **Soryu martial arts stance** in front of your webcam. The 12-poi
   - **Both-knees flexion check** (`avgKneeAngle` + `maxKneeAngle`) with seated-chair rejection
   - **Asymmetric Soryu guard**: extended/forward lead fist at shoulder height (with nose/mouth/ear proximity and chest-midline guards) paired with a flexed rear chamber near the hip
   - **Automatic Full-Body ↔ Desk Mode** adaptation with strict in-frame wrist/elbow gating
-- **Hysteresis Temporal State Machine**: `IDLE → CHARGING → ACTIVE → DISSIPATING` with `300 ms` charge debounce, `340 ms` exit hysteresis, live strictness presets (`Relaxed 64%` / `Balanced 74%` / `Strict 82%`), and optional **`Burst 5s`** mode so you can trigger once and punch freely through the full sequence.
+- **Hysteresis Temporal State Machine**: `IDLE → CHARGING → ACTIVE → DISSIPATING` with `240 ms` charge debounce, `1.25 s` minimum active hold, `550 ms` exit grace, live strictness presets (`Relaxed 58%` / `Balanced 68%` / `Strict 78%`), and optional **`Burst 5s`** mode so you can trigger once and punch freely through the full sequence.
 - **WebGL 2 Depth Compositor**: Uses MediaPipe's person confidence mask (cleaned via torso-seeded flood fill and GPU temporal smoothing) to keep the performer in front of the perspective-projected floor compass, rear strikes, and aura. Adds Sobel rim lighting, two-pass separable bloom, and shockwave background refraction, with automatic Canvas 2D fallback if WebGL is unavailable.
 - **Delayed Motion Silhouettes**: Captures masked camera snapshots into an 8-layer `TEXTURE_2D_ARRAY` and replays four glowing silhouettes delayed by ~140–470 ms around the tracked stance.
 - **Foreground VFX**: Pre-baked offscreen sprites for the razor-needle barrage, Koyuki firework bursts, wrist-tracked vortices, face-protected compositing, and a timed calligraphy reveal.
@@ -55,9 +55,9 @@ flowchart TD
 stateDiagram-v2
   [*] --> IDLE
   IDLE --> CHARGING: confidence >= lock gate
-  CHARGING --> IDLE: confidence drops before 300ms
-  CHARGING --> ACTIVE: held >= 300ms (impact + 4x echoes)
-  ACTIVE --> DISSIPATING: stance broken > 340ms (or Burst 5s ends)
+  CHARGING --> IDLE: confidence drops before 240ms
+  CHARGING --> ACTIVE: held >= 240ms (impact + 4x echoes)
+  ACTIVE --> DISSIPATING: stance broken > 550ms after 1.25s min hold
   DISSIPATING --> ACTIVE: stance re-locked
   DISSIPATING --> IDLE: intensity faded
 ```

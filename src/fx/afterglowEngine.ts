@@ -479,9 +479,9 @@ export class AfterglowFxEngine {
     if (this.prevState !== 'ACTIVE' && pose.state === 'ACTIVE') {
       this.resetEchoes();
       this.impactBeatFrames = options.strikes ? 2 : 0;
-      this.impactFlashAlpha = 0.85 * intensityScale;
-      this.shakeMagnitude = 12.0 * intensityScale;
-      this.startShock(centerPx, width, height, Math.min(1.25, intensityScale));
+      this.impactFlashAlpha = 0.55 * intensityScale;
+      this.shakeMagnitude = 7.5 * intensityScale;
+      this.startShock(centerPx, width, height, Math.min(1.2, intensityScale));
       if (options.strikes) {
         this.spawnActivationBlast(centerPx, floorPx, minDim);
       }
@@ -493,10 +493,10 @@ export class AfterglowFxEngine {
 
     // Reactive punch burst
     if (options.strikes && pose.state === 'ACTIVE' && pose.wristSpeed > 1.35 && this.punchCooldown <= 0) {
-      this.punchCooldown = 0.22;
-      this.impactBeatFrames = 2;
-      this.shakeMagnitude = Math.max(this.shakeMagnitude, 6.0 * intensityScale);
-      this.startShock(leadWristPx, width, height, 0.65 * intensityScale);
+      this.punchCooldown = 0.24;
+      this.impactBeatFrames = 1;
+      this.shakeMagnitude = Math.max(this.shakeMagnitude, 4.5 * intensityScale);
+      this.startShock(leadWristPx, width, height, 0.58 * intensityScale);
       this.spawnPunchShockwave(leadWristPx, centerPx, minDim);
       hooks?.onPunchBurst?.(2 * leadWristPx.x / width - 1, Math.min(1, pose.wristSpeed / 2.5));
     }
@@ -532,31 +532,31 @@ export class AfterglowFxEngine {
       }
 
       if (options.strikes) {
-        // 100-strike chaotic needle barrage
-        const ramp = rear ? Math.min(1, 0.20 + pose.activeDurationSec * 2.4) : 1;
-        this.needleSpawnAcc += dt * (22 + escalation * 28) * ramp * intensityScale;
+        // Controlled Blue-Silver needle barrage (keeps compass & 4 silhouettes clearly legible)
+        const ramp = rear ? Math.min(1, 0.25 + pose.activeDurationSec * 1.8) : 1;
+        this.needleSpawnAcc += dt * (9 + escalation * 13) * ramp * intensityScale;
         while (this.needleSpawnAcc >= 1) {
           this.needleSpawnAcc -= 1;
           const strike = this.spawnChaoticNeedle(width, height, centerPx, minDim);
           if (strike.isHero && !strike.behind && this.strikeCooldown <= 0 && pose.activeDurationSec > 0.54) {
-            this.strikeCooldown = 0.19;
+            this.strikeCooldown = 0.26;
             hooks?.onStrike?.(2 * strike.x0 / width - 1, 2 * strike.x1 / width - 1);
           }
         }
 
-        // Koyuki firework starbursts
-        this.fireworkSpawnAcc += dt * (1.8 + escalation * 2.4) * intensityScale;
+        // Restrained Koyuki frost starbursts
+        this.fireworkSpawnAcc += dt * (0.55 + escalation * 0.65) * intensityScale;
         if (this.fireworkSpawnAcc >= 1) {
           this.fireworkSpawnAcc -= 1;
           const angle = Math.random() * Math.PI * 2;
-          const dist = minDim * (0.26 + Math.random() * 0.26);
+          const dist = minDim * (0.28 + Math.random() * 0.24);
           const fx = Math.max(width * 0.08, Math.min(width * 0.92, centerPx.x + Math.cos(angle) * dist * 1.3));
           const fy = Math.max(height * 0.12, Math.min(height * 0.82, centerPx.y + Math.sin(angle) * dist * 0.85));
-          this.spawnKoyukiStarburst(fx, fy, minDim * 0.24, Math.max(8, Math.round(18 * intensityScale)));
+          this.spawnKoyukiStarburst(fx, fy, minDim * 0.20, Math.max(6, Math.round(11 * intensityScale)));
         }
 
         // Rising icy floor embers & wrist micro-sparks
-        const emberCount = Math.max(1, Math.round(3 * intensityScale));
+        const emberCount = Math.max(1, Math.round(1.5 * intensityScale));
         for (let i = 0; i < emberCount; i++) {
           const fromFloor = i < Math.ceil(emberCount * 0.65);
           const angle = Math.random() * Math.PI * 2;
@@ -755,24 +755,20 @@ export class AfterglowFxEngine {
   }
 
   // ---------------------------------------------------------------------------
-  // Layer 1: 2-Frame Anime Impact Beat
+  // Layer 1: 2-Frame Anime Impact Beat (Pure Blue-Silver frost frame)
   // ---------------------------------------------------------------------------
   private drawImpactBeat(ctx: CanvasRenderingContext2D, width: number, height: number): void {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
 
-    // High-contrast lateral chromatic rim split (#00f0ff on left, #ff1e56 on right)
-    const rimW = Math.max(4, Math.round(width * 0.008));
-    ctx.fillStyle = '#00f0ff';
+    const rimW = Math.max(3, Math.round(width * 0.005));
+    ctx.fillStyle = 'rgba(56, 189, 248, 0.78)';
     ctx.fillRect(0, 0, rimW, height);
-
-    ctx.fillStyle = '#ff1e56';
     ctx.fillRect(width - rimW, 0, rimW, height);
 
-    // Subtle center high-contrast shock slice
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
-    ctx.fillRect(0, 0, width, Math.max(2, Math.round(height * 0.004)));
-    ctx.fillRect(0, height - Math.max(2, Math.round(height * 0.004)), width, height);
+    ctx.fillStyle = 'rgba(224, 242, 254, 0.35)';
+    ctx.fillRect(0, 0, width, Math.max(2, Math.round(height * 0.003)));
+    ctx.fillRect(0, height - Math.max(2, Math.round(height * 0.003)), width, height);
 
     ctx.restore();
   }
@@ -1143,14 +1139,14 @@ export class AfterglowFxEngine {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     const maxR = Math.hypot(width, height) * 0.65;
-    const count = 30;
-    const seed = Math.floor(this.timeSec * 24);
+    const count = 22;
+    const seed = Math.floor(this.timeSec * 12);
 
     for (let i = 0; i < count; i++) {
       const h = Math.sin((i + 1) * 127.1 + seed * 311.7) * 43758.5453;
       const frac = h - Math.floor(h);
       const angle = (i / count) * Math.PI * 2 + (frac - 0.5) * 0.12;
-      const innerR = maxR * (0.52 + frac * 0.24);
+      const innerR = maxR * (0.58 + frac * 0.22);
       const outerR = maxR * 1.15;
 
       const x0 = center.x + Math.cos(angle) * innerR;
@@ -1158,8 +1154,8 @@ export class AfterglowFxEngine {
       const x1 = center.x + Math.cos(angle) * outerR;
       const y1 = center.y + Math.sin(angle) * outerR;
 
-      ctx.strokeStyle = `rgba(186, 230, 253, ${0.16 * intensity * (0.4 + frac * 0.6)})`;
-      ctx.lineWidth = 1.0 + frac * 1.6;
+      ctx.strokeStyle = `rgba(186, 230, 253, ${0.075 * intensity * (0.4 + frac * 0.6)})`;
+      ctx.lineWidth = 0.9 + frac * 1.2;
       ctx.beginPath();
       ctx.moveTo(x0, y0);
       ctx.lineTo(x1, y1);
@@ -1296,10 +1292,10 @@ export class AfterglowFxEngine {
       behind: true,
     });
 
-    for (let i = 0; i < 22; i++) {
+    for (let i = 0; i < 12; i++) {
       this.spawnChaoticNeedle(minDim * 1.5, minDim * 1.5, center, minDim);
     }
-    this.spawnKoyukiStarburst(center.x, center.y, minDim * 0.42, 38);
+    this.spawnKoyukiStarburst(center.x, center.y, minDim * 0.36, 22);
   }
 
   private spawnPunchShockwave(leadWrist: Vec2, center: Vec2, minDim: number): void {
@@ -1307,16 +1303,16 @@ export class AfterglowFxEngine {
       x: leadWrist.x,
       y: leadWrist.y,
       radius: 10,
-      maxRadius: minDim * 0.36,
+      maxRadius: minDim * 0.32,
       age: 0,
-      life: 0.36,
-      lineWidth: 4.2,
+      life: 0.34,
+      lineWidth: 3.6,
       tiltY: 0.54,
       angle: Math.atan2(leadWrist.y - center.y, leadWrist.x - center.x) + Math.PI * 0.5,
-      color: 'rgb(0, 240, 255)',
+      color: 'rgb(56, 189, 248)',
     });
-    this.spawnKoyukiStarburst(leadWrist.x, leadWrist.y, minDim * 0.26, 18);
-    for (let i = 0; i < 8; i++) {
+    this.spawnKoyukiStarburst(leadWrist.x, leadWrist.y, minDim * 0.22, 12);
+    for (let i = 0; i < 5; i++) {
       this.spawnChaoticNeedle(minDim * 1.5, minDim * 1.5, leadWrist, minDim);
     }
   }
@@ -1348,8 +1344,9 @@ export class AfterglowFxEngine {
     const angle = Math.atan2(y1 - y0, x1 - x0);
 
     const r = Math.random();
+    // Cohesive Blue-Silver palette (ice cyan, frost silver, subtle deep blue-violet)
     const palette: ChaoticNeedle['palette'] =
-      r < 0.48 ? 'cyan' : r < 0.78 ? 'silver' : r < 0.95 ? 'violet' : 'crimson';
+      r < 0.56 ? 'cyan' : r < 0.90 ? 'silver' : 'violet';
 
     const needle: ChaoticNeedle = {
       x0,
@@ -1359,11 +1356,11 @@ export class AfterglowFxEngine {
       len,
       angle,
       age: 0,
-      life: 0.16 + Math.random() * 0.22,
-      thickness: 1.6 + Math.random() * 3.6,
+      life: 0.20 + Math.random() * 0.24,
+      thickness: 1.4 + Math.random() * 2.8,
       palette,
-      isHero: Math.random() < 0.35,
-      behind: Math.random() < 0.68,
+      isHero: Math.random() < 0.28,
+      behind: Math.random() < 0.76,
     };
     this.needles.push(needle);
     return needle;
@@ -1431,8 +1428,8 @@ export class AfterglowFxEngine {
     }
 
     // Bound particle counts during sustained activation.
-    if (this.needles.length > 95) this.needles.length = 95;
-    if (this.particles.length > 220) this.particles.length = 220;
-    if (this.rings.length > 20) this.rings.length = 20;
+    if (this.needles.length > 50) this.needles.length = 50;
+    if (this.particles.length > 140) this.particles.length = 140;
+    if (this.rings.length > 14) this.rings.length = 14;
   }
 }
