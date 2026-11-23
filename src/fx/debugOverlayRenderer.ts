@@ -15,6 +15,8 @@ export interface VideoViewportRect {
  *  - Crisp #38bdf8 active joints
  *  - Minimalist #38bdf8 / #a78bfa lead & rear fist reticles
  *  - Razor floor anchor reticle
+ *  - Dim dashed #64748b skeletons for rejected edge-zone bystanders
+ *  - Subtle dashed STAGE hairlines at the center-zone bounds
  *  - Zero visual clutter
  */
 export function drawDebugSkeleton(
@@ -24,6 +26,8 @@ export function drawDebugSkeleton(
   pose: PoseEvaluation,
   rect: VideoViewportRect,
   mirrored: boolean,
+  ignoredPoses?: Landmark3D[][],
+  centerZoneOnly = true,
 ): void {
   const toScreen = (nx: number, ny: number) => ({
     x: rect.offsetX + (mirrored ? 1 - nx : nx) * rect.drawWidth,
@@ -32,7 +36,74 @@ export function drawDebugSkeleton(
 
   ctx.save();
 
-  // 1. Raw landmarks (ultra-faint hairline dots for CV jitter reference)
+  // 0. Center-stage exclusion hairlines (mirroring-safe: zone is x-symmetric)
+  if (centerZoneOnly) {
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.28)';
+    ctx.lineWidth = 1;
+    for (const nx of [0.18, 0.82]) {
+      const x = rect.offsetX + nx * rect.drawWidth;
+      ctx.beginPath();
+      ctx.moveTo(x, rect.offsetY);
+      ctx.lineTo(x, rect.offsetY + rect.drawHeight);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    ctx.font = '600 8px "JetBrains Mono", monospace';
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.5)';
+    const stageTop = rect.offsetY + 12;
+    ctx.fillText('STAGE', rect.offsetX + 0.18 * rect.drawWidth + 5, stageTop);
+    ctx.textAlign = 'right';
+    ctx.fillText('STAGE', rect.offsetX + 0.82 * rect.drawWidth - 5, stageTop);
+    ctx.textAlign = 'left';
+  }
+
+  // 1. Rejected bystanders: dim dashed skeleton + IGNORED tag (never LEAD/REAR)
+  if (ignoredPoses && ignoredPoses.length > 0) {
+    ctx.globalAlpha = 0.45;
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = '#64748b';
+    ctx.lineWidth = 1.2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.font = '600 8px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#64748b';
+
+    for (const ignored of ignoredPoses) {
+      if (!ignored || ignored.length < 29) continue;
+      ctx.beginPath();
+      for (const [a, b] of POSE_CONNECTIONS) {
+        const la = ignored[a];
+        const lb = ignored[b];
+        if (!la || !lb || (la.visibility ?? 1) < 0.25 || (lb.visibility ?? 1) < 0.25) continue;
+        const pa = toScreen(la.x, la.y);
+        const pb = toScreen(lb.x, lb.y);
+        ctx.moveTo(pa.x, pa.y);
+        ctx.lineTo(pb.x, pb.y);
+      }
+      ctx.stroke();
+
+      let labelPt: { x: number; y: number } | null = null;
+      const nose = ignored[POSE_IDX.NOSE];
+      if (nose && (nose.visibility ?? 1) >= 0.25) {
+        labelPt = toScreen(nose.x, nose.y);
+      } else {
+        const lSh = ignored[POSE_IDX.LEFT_SHOULDER];
+        const rSh = ignored[POSE_IDX.RIGHT_SHOULDER];
+        if (lSh && rSh) {
+          labelPt = toScreen((lSh.x + rSh.x) * 0.5, Math.min(lSh.y, rSh.y));
+        }
+      }
+      if (labelPt) {
+        ctx.fillText('IGNORED', labelPt.x + 8, labelPt.y - 12);
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.setLineDash([]);
+  }
+
+  // 2. Raw landmarks (ultra-faint hairline dots for CV jitter reference)
   if (raw && raw.length >= 29) {
     ctx.fillStyle = 'rgba(244, 114, 182, 0.28)';
     for (let i = 11; i < 29; i++) {
@@ -45,7 +116,7 @@ export function drawDebugSkeleton(
     }
   }
 
-  // 2. Sony CineAlta monochrome bone skeleton with ice-cyan active joints
+  // 3. Sony CineAlta monochrome bone skeleton with ice-cyan active joints
   if (smoothed && smoothed.length >= 29) {
     // Thin 1.5px #94a3b8 bones
     ctx.strokeStyle = '#94a3b8';
@@ -117,7 +188,7 @@ export function drawDebugSkeleton(
     }
   }
 
-  // 3. Crisp Floor Compass anchor reticle
+  // 4. Crisp Floor Compass anchor reticle
   if (pose.hasPerson) {
     const fp = toScreen(pose.floorAnchor.x, pose.floorAnchor.y);
 

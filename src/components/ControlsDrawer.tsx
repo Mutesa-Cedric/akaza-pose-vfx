@@ -11,6 +11,8 @@ interface ControlsDrawerProps {
   onChangeEntryThreshold: (value: number) => void;
   triggerMode: TriggerMode;
   onChangeTriggerMode: (mode: TriggerMode) => void;
+  centerZoneOnly: boolean;
+  onToggleCenterZoneOnly: () => void;
   fxOptions: AfterglowFxOptions;
   onChangeFxOptions: (options: AfterglowFxOptions) => void;
   volume: number;
@@ -88,6 +90,8 @@ export function ControlsDrawer({
   onChangeEntryThreshold,
   triggerMode,
   onChangeTriggerMode,
+  centerZoneOnly,
+  onToggleCenterZoneOnly,
   fxOptions,
   onChangeFxOptions,
   volume,
@@ -182,6 +186,18 @@ export function ControlsDrawer({
             ))}
           </div>
         </div>
+        <button
+          type="button"
+          onClick={onToggleCenterZoneOnly}
+          title="Track only the center-stage performer — seated bystanders at the frame edges are ignored"
+          className={`w-full rounded border py-1.5 text-[9px] font-mono tracking-wider transition cursor-pointer ${
+            centerZoneOnly
+              ? 'border-[#38bdf8]/40 bg-[#38bdf8]/10 text-[#38bdf8]'
+              : 'border-white/10 bg-white/5 text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          {centerZoneOnly ? 'STAGE LOCK: CENTER ZONE' : 'STAGE LOCK: FULL FRAME'}
+        </button>
       </div>
 
       {/* Section 2 — Pipeline Layers */}

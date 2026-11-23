@@ -7,6 +7,10 @@ export interface TelemetrySnapshot {
   maskMs: number;
   fxRenderMs: number;
   pose: PoseEvaluation;
+  /** Number of people MediaPipe detected this frame (0..numPoses). */
+  subjectCount: number;
+  /** Candidates rejected by the center-zone / completeness gate. */
+  ignoredCount: number;
   engineInfo: PoseEngineInfo | null;
   renderer: string;
 }
@@ -63,7 +67,7 @@ function HairlineMetric({
 }
 
 export function TechHud({ telemetry, entryThreshold, triggerMode, oneEuroEnabled, onToggleOneEuro }: TechHudProps) {
-  const { fps, inferenceMs, maskMs, fxRenderMs, pose, engineInfo, renderer } = telemetry;
+  const { fps, inferenceMs, maskMs, fxRenderMs, pose, subjectCount, ignoredCount, engineInfo, renderer } = telemetry;
 
   return (
     <aside className="pointer-events-auto w-72 rounded-xl border border-white/10 bg-[#030611]/90 p-3.5 backdrop-blur-md shadow-2xl select-none">
@@ -154,9 +158,18 @@ export function TechHud({ telemetry, entryThreshold, triggerMode, oneEuroEnabled
         </button>
       </div>
 
-      {/* Stance orientation & wrist speed */}
+      {/* Subject tracking status, stance orientation & wrist speed */}
       <div className="mt-2 flex items-center justify-between text-[9px] font-mono text-slate-500 pt-1">
-        <span>{pose.resolvedMode === 'full-body' ? 'FULL BODY' : 'DESK'}</span>
+        <span>
+          {!pose.hasPerson
+            ? 'NO SUBJECT'
+            : subjectCount <= 1
+              ? 'CENTER LOCK'
+              : `TRACKED 1/${subjectCount}`}
+        </span>
+        {ignoredCount > 0 && (
+          <span className="text-slate-600">IGNORED: {ignoredCount}</span>
+        )}
         <span>LEAD: {pose.stanceSide.toUpperCase()}</span>
         {triggerMode === 'burst' && (
           <span className="rounded border border-[#38bdf8]/40 bg-[#38bdf8]/10 px-1 text-[#38bdf8]">

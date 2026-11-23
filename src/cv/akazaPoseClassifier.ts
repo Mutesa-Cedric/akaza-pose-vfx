@@ -1,10 +1,6 @@
 import type { Landmark3D } from './oneEuroFilter';
 import { POSE_IDX } from './poseLandmarker';
 
-export type DetectionMode = 'auto' | 'full-body' | 'upper-body';
-
-export type ResolvedMode = 'full-body' | 'upper-body';
-
 export type PoseState = 'IDLE' | 'CHARGING' | 'ACTIVE' | 'DISSIPATING';
 
 export type StanceSide = 'left-lead' | 'right-lead';
@@ -54,7 +50,6 @@ export interface PoseSubScores {
 
 export interface PoseTelemetry {
   hasPerson: boolean;
-  resolvedMode: ResolvedMode;
   stanceSide: StanceSide;
   subScores: PoseSubScores;
   /** Raw instantaneous frame confidence in [0, 1]. */
@@ -123,17 +118,6 @@ function isVisible(lm: Landmark3D | undefined, threshold = 0.35): boolean {
   return Boolean(lm && (lm.visibility ?? 1) >= threshold && lm.y >= 0.01 && lm.y <= 0.99);
 }
 
-function isInFrame(lm: Landmark3D | undefined, threshold = 0.42): boolean {
-  return Boolean(
-    lm &&
-      (lm.visibility ?? 1) >= threshold &&
-      lm.x >= 0.01 &&
-      lm.x <= 0.99 &&
-      lm.y >= 0.02 &&
-      lm.y <= 0.97,
-  );
-}
-
 /**
  * Geometry-based, scale-invariant, mirror-invariant classifier for Akaza's
  * Destructive Death — Final Form: Blue Silver Chaotic Afterglow (Soryu martial arts stance)
@@ -200,7 +184,6 @@ export class AkazaPoseTracker {
   update(
     landmarks2D: Landmark3D[] | null,
     worldLandmarks3D: Landmark3D[] | null,
-    mode: DetectionMode,
     timestampMs: number,
     manualOverride = false,
   ): PoseTelemetry {
@@ -219,7 +202,6 @@ export class AkazaPoseTracker {
       this.lastRawConfidence = 1;
       return {
         hasPerson: Boolean(landmarks2D),
-        resolvedMode: mode === 'upper-body' ? 'upper-body' : 'full-body',
         stanceSide: 'left-lead',
         subScores: {
           stanceWidth: 1,
@@ -233,7 +215,7 @@ export class AkazaPoseTracker {
         chargeProgress: 1,
         effectIntensity: this.effectIntensity,
         activeDurationSec: this.activeElapsedSec,
-        floorAnchor: landmarks2D ? this.computeFloorAnchor(landmarks2D, 'full-body', 0.25, dtSec) : { x: 0.5, y: 0.84 },
+        floorAnchor: landmarks2D ? this.computeFloorAnchor(landmarks2D, 0.25, dtSec) : { x: 0.5, y: 0.84 },
         bodyCenter: landmarks2D ? this.computeBodyCenter(landmarks2D) : { x: 0.5, y: 0.48 },
         bodyScale: landmarks2D ? this.computeBodyScale(landmarks2D) : 0.14,
         leadWrist: landmarks2D?.[POSE_IDX.LEFT_WRIST] ?? { x: 0.62, y: 0.44 },
@@ -250,7 +232,6 @@ export class AkazaPoseTracker {
       this.prevFloorAnchor = null;
       return {
         hasPerson: false,
-        resolvedMode: mode === 'upper-body' ? 'upper-body' : 'full-body',
         stanceSide: this.latchedSide,
         subScores: {
           stanceWidth: 0,
@@ -286,16 +267,10 @@ export class AkazaPoseTracker {
     const lAnk = landmarks2D[POSE_IDX.LEFT_ANKLE];
     const rAnk = landmarks2D[POSE_IDX.RIGHT_ANKLE];
 
+    // Akaza's Soryu stance is a FULL-BODY horse stance — knees must be visible or
+    // the pose can never be confirmed (seated/cropped detections score 0).
     const kneesVisible = isVisible(lKnee, 0.45) && isVisible(rKnee, 0.45);
     const anklesVisible = isVisible(lAnk, 0.35) && isVisible(rAnk, 0.35);
-    const lowerBodyVisible = kneesVisible && (anklesVisible || (lKnee.y < 0.94 && rKnee.y < 0.94));
-
-    const resolvedMode: ResolvedMode =
-      mode === 'auto'
-        ? lowerBodyVisible
-          ? 'full-body'
-          : 'upper-body'
-        : mode;
 
     const shMid: Vec2 = { x: (lSh.x + rSh.x) * 0.5, y: (lSh.y + rSh.y) * 0.5 };
     const hipMid: Vec2 = { x: (lHip.x + rHip.x) * 0.5, y: (lHip.y + rHip.y) * 0.5 };
@@ -546,11 +521,12 @@ export class AkazaPoseTracker {
 
     // -------------------------------------------------------------------------
     // 2. Evaluate LOWER-BODY SORYU STANCE (Wide horse stance + both-knee crouch)
+    //    Only when both knees are visible — no lower body, no trigger, ever.
     // -------------------------------------------------------------------------
     let stanceWidth = 0;
     let squatDepth = 0;
 
-    if (lowerBodyVisible) {
+    if (kneesVisible) {
       const kneeWidth = Math.abs(lKnee.x - rKnee.x);
       const ankleWidth = anklesVisible ? Math.abs(lAnk.x - rAnk.x) : kneeWidth;
       // Standing ratio ~1.0, Akaza wide horse stance ~1.7..2.2
@@ -585,7 +561,7 @@ export class AkazaPoseTracker {
         const widthRatio3D = sep3D / Math.max(1e-4, shoulderWidth3D);
         widthRatio = Math.max(widthRatio2D, widthRatio3D);
       }
-      stanceWidth = smoothstep(1.18, 1.68, widthRatio);
+      stanceWidth = smoothstep(1.1, 1.58, widthRatio);
 
       // 2D hip-to-knee drop: standing ~0.64, crouched ~0.12..0.42
       const kneeMidY = (lKnee.y + rKnee.y) * 0.5;
@@ -616,50 +592,87 @@ export class AkazaPoseTracker {
 
       squatDepth = clamp01(Math.max(squat2D * bothBentGate, squat3D * 0.96));
 
-      // Seated chair guard: penalize narrow tucked ankles under a chair with horizontal thighs
-      if (
-        resolvedMode === 'full-body' &&
-        ankleWidth / bodyScale < 1.15 &&
-        hipToKneeRatio < 0.34
-      ) {
-        const chairPenalty =
-          smoothstep(0.80, 1.15, ankleWidth / bodyScale) *
-          smoothstep(0.14, 0.34, hipToKneeRatio);
-        squatDepth *= chairPenalty * 0.15;
-        stanceWidth *= chairPenalty * 0.15;
+      // -------------------------------------------------------------------
+      // SEATED-PERSON REJECTION (chair / desk / interview-room bystanders).
+      // A seated silhouette can fake flat thighs and even bent knees, but it
+      // cannot fake a planted martial base: feet either sit narrow under the
+      // chair, tuck together behind wide knees, or vanish under furniture.
+      // -------------------------------------------------------------------
+      if (anklesVisible) {
+        const ankleRatio = ankleWidth / bodyScale;
+
+        // Guard A — narrow feet under a chair with horizontal thighs:
+        // ankles clearly inside shoulder span while hips sit at chair height.
+        const narrowFeet = 1 - smoothstep(0.85, 1.25, ankleRatio);
+        const flatThighs = 1 - smoothstep(0.24, 0.36, hipToKneeRatio);
+        const chairSit = narrowFeet * flatThighs;
+        if (chairSit > 0) {
+          const crush = 1 - 0.95 * chairSit;
+          squatDepth *= crush;
+          stanceWidth *= crush;
+        }
+
+        // Guard B — knees apart but feet tucked together (relaxed sit /
+        // manspreading). A real horse stance plants ankles near knee width
+        // (~0.85x+) and always wider than ~1.3x body scale; tucked feet
+        // collapse BOTH ratios. Graded so genuine stances (>=0.84) escape.
+        const ankleToKnee = ankleWidth / Math.max(kneeWidth, 1e-4);
+        const tucked = smoothstep(0.84, 0.55, ankleToKnee);
+        const feetNarrow = smoothstep(1.3, 1.02, ankleRatio);
+        const flatThighsB = 1 - smoothstep(0.26, 0.38, hipToKneeRatio);
+        let manspread = tucked * Math.max(0.55, feetNarrow) * flatThighsB;
+        if (manspread > 0 && w && torsoLen3D > 1e-4) {
+          // 3D confirm: tucked chair feet sit far BEHIND the knees (+z away
+          // from camera). Real stance feet trail knees only modestly.
+          const ankleBackZ =
+            ((w[POSE_IDX.LEFT_ANKLE].z + w[POSE_IDX.RIGHT_ANKLE].z) * 0.5 -
+              (w[POSE_IDX.LEFT_KNEE].z + w[POSE_IDX.RIGHT_KNEE].z) * 0.5) /
+            torsoLen3D;
+          manspread = Math.max(manspread, smoothstep(0.55, 0.85, ankleBackZ) * feetNarrow);
+        }
+        if (manspread > 0) {
+          const crush = 1 - 0.92 * manspread;
+          squatDepth *= crush;
+          stanceWidth *= crush;
+        }
+      } else if (hipToKneeRatio < 0.34) {
+        // Guard C — ankles hidden under a desk/chair + flat thighs: only a
+        // genuinely wide martial knee spread on a coherent upright torso may
+        // keep lower-body credit; everyone else is a desk sitter.
+        const kneeRatio = kneeWidth / bodyScale;
+        const wideKnees = smoothstep(1.42, 1.58, kneeRatio);
+        let torsoOK: number;
+        if (uSpine) {
+          const spineVertical = -uSpine.y; // world +y points down
+          const reclined = uSpine.z; // +z leans back away from camera
+          torsoOK =
+            smoothstep(0.55, 0.75, spineVertical) *
+            (1 - smoothstep(0.15, 0.4, reclined));
+        } else {
+          const lateralLean = Math.abs(shMid.x - hipMid.x) / torsoHeight;
+          torsoOK = 1 - smoothstep(0.45, 0.7, lateralLean);
+        }
+        const pass = wideKnees * torsoOK;
+        squatDepth *= Math.max(0.05, pass);
+        stanceWidth *= Math.max(0.12, pass);
       }
     }
 
     // -------------------------------------------------------------------------
-    // 3. Combine scores with strict multiplicative gating
+    // 3. Combine scores with strict multiplicative gating (lowerGeo * armGeo):
+    //    BOTH a wide+deep stance AND full asymmetric Soryu arms are required.
     // -------------------------------------------------------------------------
-    let rawConfidence = 0;
-    if (resolvedMode === 'full-body') {
-      const lowerLinear = stanceWidth * 0.45 + squatDepth * 0.55;
-      const lowerGeo = Math.sqrt(stanceWidth * squatDepth);
-      const lowerScore = clamp01(lowerLinear * 0.42 + lowerGeo * 0.58);
-      const upperScore = armEval.combinedArm;
+    const lowerLinear = stanceWidth * 0.45 + squatDepth * 0.55;
+    const lowerGeo = Math.sqrt(stanceWidth * squatDepth);
+    const lowerScore = clamp01(lowerLinear * 0.42 + lowerGeo * 0.58);
+    const upperScore = armEval.combinedArm;
 
-      // Strict geometric-weighted fusion: standing straight OR relaxed arms CANNOT trigger
-      const weighted = lowerScore * 0.50 + upperScore * 0.50;
-      const gate = Math.sqrt(lowerScore * upperScore);
-      rawConfidence = clamp01(weighted * 0.30 + gate * 0.70);
-    } else {
-      // Desk / Upper-Body mode: require both wrists & elbows in frame, without forcing hips inside
-      // laptop webcam bounds (hips naturally sit below the bottom edge when seated at a desk).
-      const upperClean =
-        isInFrame(lWr, 0.42) &&
-        isInFrame(rWr, 0.42) &&
-        isInFrame(lEl, 0.42) &&
-        isInFrame(rEl, 0.42);
-      const elbowsSpread = Math.abs(lEl.x - rEl.x) / bodyScale;
-      const readinessBonus = smoothstep(1.12, 1.56, elbowsSpread);
-      rawConfidence = upperClean
-        ? clamp01(armEval.combinedArm * (0.80 + 0.20 * readinessBonus) * 0.94)
-        : 0;
-      stanceWidth = readinessBonus;
-      squatDepth = armEval.armAsymmetry;
-    }
+    // Strict geometric-weighted fusion: standing straight OR relaxed arms CANNOT trigger
+    const fullLinear = lowerScore * 0.5 + upperScore * 0.5;
+    const fullGeo = Math.sqrt(lowerScore * upperScore);
+    const rawConfidence = kneesVisible
+      ? clamp01(fullLinear * 0.3 + fullGeo * 0.7)
+      : 0;
 
     // Compute velocity per anatomical wrist (immune to left-lead <-> right-lead stance flips)
     let wristSpeed = 0;
@@ -679,7 +692,6 @@ export class AkazaPoseTracker {
 
     return {
       hasPerson: true,
-      resolvedMode,
       stanceSide,
       subScores: {
         stanceWidth,
@@ -693,7 +705,7 @@ export class AkazaPoseTracker {
       chargeProgress: this.computeChargeProgress(),
       effectIntensity: this.effectIntensity,
       activeDurationSec: this.activeElapsedSec,
-      floorAnchor: this.computeFloorAnchor(landmarks2D, resolvedMode, torsoHeight, dtSec),
+      floorAnchor: this.computeFloorAnchor(landmarks2D, torsoHeight, dtSec),
       bodyCenter: this.computeBodyCenter(landmarks2D),
       bodyScale,
       leadWrist,
@@ -788,7 +800,6 @@ export class AkazaPoseTracker {
 
   private computeFloorAnchor(
     lm: Landmark3D[],
-    resolvedMode: ResolvedMode,
     torsoHeight: number,
     dtSec: number,
   ): Vec2 {
@@ -807,19 +818,17 @@ export class AkazaPoseTracker {
     let targetX = (lHip.x + rHip.x) * 0.5;
     let targetY = 0.88;
 
-    if (resolvedMode === 'full-body') {
-      if (anklesVisible) {
-        const footY =
-          isVisible(lHeel, 0.25) && isVisible(rHeel, 0.25)
-            ? Math.max((lAnk.y + rAnk.y) * 0.5, (lHeel.y + rHeel.y) * 0.5)
-            : (lAnk.y + rAnk.y) * 0.5;
-        targetX = (lAnk.x + rAnk.x) * 0.5;
-        targetY = Math.min(0.97, footY + 0.015);
-      } else if (kneesVisible) {
-        const kneeMidY = (lKnee.y + rKnee.y) * 0.5;
-        targetX = (lKnee.x + rKnee.x) * 0.5;
-        targetY = clamp(kneeMidY + clamp(torsoHeight * 0.72, 0.10, 0.24), 0.58, 0.97);
-      }
+    if (anklesVisible) {
+      const footY =
+        isVisible(lHeel, 0.25) && isVisible(rHeel, 0.25)
+          ? Math.max((lAnk.y + rAnk.y) * 0.5, (lHeel.y + rHeel.y) * 0.5)
+          : (lAnk.y + rAnk.y) * 0.5;
+      targetX = (lAnk.x + rAnk.x) * 0.5;
+      targetY = Math.min(0.97, footY + 0.015);
+    } else if (kneesVisible) {
+      const kneeMidY = (lKnee.y + rKnee.y) * 0.5;
+      targetX = (lKnee.x + rKnee.x) * 0.5;
+      targetY = clamp(kneeMidY + clamp(torsoHeight * 0.72, 0.10, 0.24), 0.58, 0.97);
     }
 
     // Smoothly damp floorAnchor internally so it never jumps on single-frame ankle visibility drops

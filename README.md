@@ -10,19 +10,19 @@ Strike Akaza's **Soryu martial arts stance** in front of your webcam. The 12-poi
 
 ## Features
 
-- **100% Client-Side Real-Time CV & Fast Cold Start**: Runs MediaPipe Tasks Vision (`PoseLandmarker` BlazePose Lite FP16) locally in the browser using WebGL/GPU acceleration with automatic CPU/WASM fallback. Preloads the FP16 model and WASM fileset in parallel and lets the camera open immediately while CV warms up in the background.
+- **100% Client-Side Real-Time CV & Fast Cold Start**: Runs MediaPipe Tasks Vision (`PoseLandmarker` BlazePose Lite FP16, `numPoses: 3`) locally in the browser using WebGL/GPU acceleration with automatic CPU/WASM fallback. Preloads the FP16 model and WASM fileset in parallel and lets the camera open immediately while CV warms up in the background.
+- **Multi-Person Subject Selection**: A `SubjectSelector` scores every detected person each frame — center proximity, full-body framing, subject prominence, plus a sticky temporal lock — and tracks only the active center-stage performer. Friends seated at the room edges are hard-rejected by the center-zone gate (`STAGE LOCK` toggle in the Control Deck), render as dim `IGNORED` skeletons in the debug overlay, and can never steal the stance, the person matte, or the echo history. A tracked-subject switch hard-resets the smoother, tracker, FX engine, compositor echoes, and charge audio so one person's state never bleeds onto another.
 - **One-Euro Adaptive Landmark Smoothing**: Implements the [One-Euro Filter](https://gery.casiez.net/1euro/) per axis for both 2D normalized landmarks (`minCutoff: 0.85 Hz`, `beta: 3.2`) and 3D `worldLandmarks` (`minCutoff: 1.0 Hz`, `beta: 2.5`) with >400 ms stale-gap reset and reusable pre-allocated buffers.
-- **Scale-, Yaw-, and Mirror-Invariant Soryu Classifier**: Uses multiplicative geometric gating across 3D `worldLandmarks` and 2D normalized proportions so casual gestures, waving, walking strides, and sitting at a desk stay `IDLE`:
+- **Scale-, Yaw-, and Mirror-Invariant Soryu Classifier**: Pure full-body detection — both knees must be in frame or the pose can never charge, so seated and cropped detections score 0. Uses multiplicative geometric gating across 3D `worldLandmarks` and 2D normalized proportions so casual gestures, waving, walking strides, and sitting in a chair stay `IDLE`:
   - **3D lateral stance projection** onto the shoulder-to-shoulder axis (stays wide at 30°–45° yaw while rejecting front-to-back walking strides)
   - **Both-knees flexion check** (`avgKneeAngle` + `maxKneeAngle`) with seated-chair rejection
   - **Asymmetric Soryu guard**: extended/forward lead fist at shoulder height (with nose/mouth/ear proximity and chest-midline guards) paired with a flexed rear chamber near the hip
-  - **Automatic Full-Body ↔ Desk Mode** adaptation with strict in-frame wrist/elbow gating
 - **Hysteresis Temporal State Machine**: `IDLE → CHARGING → ACTIVE → DISSIPATING` with `240 ms` charge debounce, `1.25 s` minimum active hold, `550 ms` exit grace, live strictness presets (`Relaxed 58%` / `Balanced 68%` / `Strict 78%`), and optional **`Burst 5s`** mode so you can trigger once and punch freely through the full sequence.
 - **WebGL 2 Depth Compositor**: Uses MediaPipe's person confidence mask (cleaned via torso-seeded flood fill and GPU temporal smoothing) to keep the performer in front of the perspective-projected floor compass, rear strikes, and aura. Adds Sobel rim lighting, two-pass separable bloom, and shockwave background refraction, with automatic Canvas 2D fallback if WebGL is unavailable.
 - **Delayed Motion Silhouettes**: Captures masked camera snapshots into an 8-layer `TEXTURE_2D_ARRAY` and replays four glowing silhouettes delayed by ~140–470 ms around the tracked stance.
 - **Foreground VFX**: Pre-baked offscreen sprites for the razor-needle barrage, Koyuki firework bursts, wrist-tracked vortices, face-protected compositing, and a timed calligraphy reveal.
 - **Procedural Stereo Web Audio**: Synthesizes the rising charge tone, compass impact drop, four stereo-panned echo cues synced to silhouette entrances, sweeping foreground slashes, and wrist-panned punch bursts entirely in-browser.
-- **Control Deck (`C` key) & Telemetry HUD (`D` key)**: Live strictness presets and lock-gate slider, `Hold` / `Burst 5s` release toggle, per-layer pipeline switches (`Depth Matte`, `4× Echoes`, `Compass`, `Strikes`), FX intensity and audio level sliders, camera device selector, live FPS/inference/matte/FX latency counters, One-Euro filter toggle, and debug skeleton overlay.
+- **Control Deck (`C` key) & Telemetry HUD (`D` key)**: Live strictness presets and lock-gate slider, `Hold` / `Burst 5s` release toggle, `STAGE LOCK` center-zone bystander-exclusion toggle, per-layer pipeline switches (`Depth Matte`, `4× Echoes`, `Compass`, `Strikes`), FX intensity and audio level sliders, camera device selector, live FPS/inference/matte/FX latency counters, multi-person tracking status (`TRACKED n/m` · `IGNORED`), One-Euro filter toggle, and debug skeleton overlay.
 - **Video Clip Test Mode**: Load any browser-supported local `.mov` or `.mp4` clip to run the full pipeline on repeatable footage (`Space` to pause/resume).
 
 ---
@@ -31,13 +31,16 @@ Strike Akaza's **Soryu martial arts stance** in front of your webcam. The 12-poi
 
 ```mermaid
 flowchart TD
-  Input["Webcam / Local Video Clip"] --> MP["MediaPipe PoseLandmarker (GPU -> WASM fallback)"]
+  Input["Webcam / Local Video Clip"] --> MP["MediaPipe PoseLandmarker (GPU -> WASM fallback, numPoses 3)"]
 
-  MP --> LM["2D + 3D World Landmarks"]
-  MP --> Mask["Person Segmentation Mask"]
+  MP --> LM["2D + 3D World Landmarks (up to 3 people)"]
+  MP --> Masks["Per-Subject Segmentation Masks"]
 
-  LM --> Filter["One-Euro Filter (2D + 3D)"]
-  Filter --> Classifier["Soryu Pose Classifier & State Machine"]
+  LM --> Selector["SubjectSelector (center-stage sticky lock + edge-zone bystander rejection)"]
+  Selector -->|"Selected performer"| Filter["One-Euro Filter (2D + 3D)"]
+  Selector -->|"Selected mask index"| Mask["Active subject mask"]
+  Masks --> Mask
+  Filter --> Classifier["Full-Body Soryu Pose Classifier & State Machine"]
   Classifier -->|"Anchors & Timing"| FX["Afterglow FX Engine (Canvas 2D)"]
   Classifier -->|"State & Panning Cues"| Audio["Procedural Stereo Audio (Web Audio)"]
   Classifier -->|"Sub-Scores & Gate"| HUD["Telemetry HUD & Control Deck"]
@@ -73,7 +76,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` and click **Initialize Camera**. Step back until your knees/feet fit in frame, drop into a wide horse stance, raise your lead fist forward at shoulder height, and chamber your rear fist low by your hip.
+Open `http://localhost:5173` and click **Initialize Camera**. Step back until your knees/feet fit in frame, drop into a wide horse stance, raise your lead fist forward at shoulder height, and chamber your rear fist low by your hip. Friends seated off to the sides won't steal tracking — the center-stage lock ignores them automatically (toggle **STAGE LOCK** in the Control Deck to let anyone in frame trigger).
 
 ### Keyboard Shortcuts
 

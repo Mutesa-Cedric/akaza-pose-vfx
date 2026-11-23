@@ -96,7 +96,7 @@ export async function createPoseEngine(outputSegmentationMasks: boolean): Promis
     return PoseLandmarker.createFromOptions(vision, {
       baseOptions,
       runningMode: 'VIDEO',
-      numPoses: 1,
+      numPoses: 3,
       minPoseDetectionConfidence: 0.45,
       minPosePresenceConfidence: 0.45,
       minTrackingConfidence: 0.45,

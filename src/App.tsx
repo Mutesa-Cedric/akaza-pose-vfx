@@ -15,17 +15,16 @@ import {
 import {
   AkazaPoseTracker,
   DEFAULT_TRACKER_CONFIG,
-  type DetectionMode,
   type PoseEvaluation,
   type TriggerMode,
 } from './cv/akazaPoseClassifier';
 import { PoseLandmarkSmoother, type Landmark3D } from './cv/oneEuroFilter';
 import {
   createPoseEngine,
-  POSE_IDX,
   type PoseEngineInfo,
   type PoseLandmarker,
 } from './cv/poseLandmarker';
+import { SubjectSelector } from './cv/subjectSelector';
 import {
   AfterglowFxEngine,
   DEFAULT_FX_OPTIONS,
@@ -46,7 +45,6 @@ type MediaSourceKind = 'none' | 'camera' | 'video';
 
 const INITIAL_POSE: PoseEvaluation = {
   hasPerson: false,
-  resolvedMode: 'full-body',
   stanceSide: 'left-lead',
   subScores: {
     stanceWidth: 0,
@@ -176,27 +174,32 @@ function SnowflakeCompassWatermark() {
   );
 }
 
-/** Razor-thin right-edge vertical Stance Lock hairline meter */
-function StanceLockMeter({ confidence, threshold = 0.74 }: { confidence: number; threshold?: number }) {
+/** Right-edge vertical Stance Lock meter — readable from a 2-meter room distance */
+function StanceLockMeter({ confidence, threshold = 0.74, charging = false }: { confidence: number; threshold?: number; charging?: boolean }) {
   const isLocked = confidence >= threshold;
+  const isHot = isLocked || charging;
   const pct = Math.min(100, Math.max(0, Math.round(confidence * 100)));
   const gatePct = Math.min(100, Math.max(0, Math.round(threshold * 100)));
 
   return (
     <div className="pointer-events-none fixed right-3 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center">
-      <div className="relative h-44 w-[2px] rounded-full bg-white/10 overflow-hidden">
+      <div className="relative h-48 w-1 rounded-full bg-white/10">
         <div
-          className={`absolute bottom-0 inset-x-0 transition-[height,background-color] duration-100 ${
-            isLocked ? 'bg-[#38bdf8] shadow-[0_0_8px_#38bdf8]' : 'bg-slate-500'
+          className={`absolute bottom-0 inset-x-0 rounded-full transition-[height,background-color,box-shadow] duration-100 ${
+            isLocked
+              ? 'bg-[#38bdf8] shadow-[0_0_12px_#38bdf8]'
+              : isHot
+                ? 'bg-[#38bdf8]/70 shadow-[0_0_8px_rgba(56,189,248,0.55)]'
+                : 'bg-slate-500'
           }`}
           style={{ height: `${pct}%` }}
         />
         <div
-          className={`absolute -inset-x-0.5 h-[1px] z-10 ${isLocked ? 'bg-[#38bdf8]' : 'bg-white'}`}
+          className="absolute -inset-x-1 h-[2px] z-10 bg-white"
           style={{ bottom: `${gatePct}%` }}
         />
       </div>
-      <div className="mt-2 -rotate-90 origin-center text-[8px] font-mono tracking-widest text-slate-400 select-none whitespace-nowrap">
+      <div className="mt-2 -rotate-90 origin-center text-[9px] font-mono tracking-widest text-slate-400 select-none whitespace-nowrap">
         {pct}%
       </div>
     </div>
@@ -213,12 +216,13 @@ export default function App() {
   const landmarkerRef = useRef<PoseLandmarker | null>(null);
   const [smoother] = useState(() => new PoseLandmarkSmoother(33));
   const [tracker] = useState(() => new AkazaPoseTracker());
+  const [subjectSelector] = useState(() => new SubjectSelector());
   const [fxEngine] = useState(() => new AfterglowFxEngine());
   const [soundEngine] = useState(() => new AfterglowSoundEngine());
 
   // Mutable settings read by the render loop.
   const engineInfoRef = useRef<PoseEngineInfo | null>(null);
-  const modeRef = useRef<DetectionMode>('auto');
+  const centerZoneOnlyRef = useRef(true);
   const mirroredRef = useRef(true);
   const showHudRef = useRef(false);
   const oneEuroRef = useRef(true);
@@ -236,7 +240,7 @@ export default function App() {
   const [modelStatus, setModelStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [engineInfo, setEngineInfo] = useState<PoseEngineInfo | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [mode, setMode] = useState<DetectionMode>('auto');
+  const [centerZoneOnly, setCenterZoneOnly] = useState(true);
   const [mirrored, setMirrored] = useState(true);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(0.85);
@@ -257,14 +261,16 @@ export default function App() {
     maskMs: 0,
     fxRenderMs: 0,
     pose: INITIAL_POSE,
+    subjectCount: 0,
+    ignoredCount: 0,
     engineInfo: null,
     renderer: 'Canvas 2D',
   });
 
   // Keep refs synchronized with UI toggles
   useEffect(() => {
-    modeRef.current = mode;
-  }, [mode]);
+    centerZoneOnlyRef.current = centerZoneOnly;
+  }, [centerZoneOnly]);
   useEffect(() => {
     mirroredRef.current = mirrored;
   }, [mirrored]);
@@ -333,8 +339,9 @@ export default function App() {
     simulateRef.current = false;
     smoother.reset();
     tracker.reset();
+    subjectSelector.reset();
     fxEngine.reset();
-  }, [fxEngine, smoother, soundEngine, tracker]);
+  }, [fxEngine, smoother, soundEngine, subjectSelector, tracker]);
 
   const startCamera = useCallback(
     async (facing: 'user' | 'environment' = facingMode, deviceId?: string) => {
@@ -416,6 +423,7 @@ export default function App() {
   const handleResetDefaults = useCallback(() => {
     setEntryThreshold(DEFAULT_TRACKER_CONFIG.entryThreshold);
     setTriggerMode(DEFAULT_TRACKER_CONFIG.triggerMode);
+    setCenterZoneOnly(true);
     setFxOptions({ ...DEFAULT_FX_OPTIONS });
     setVolume(0.85);
     setMuted(false);
@@ -579,6 +587,9 @@ export default function App() {
     let smoothedLandmarks: Landmark3D[] | null = null;
     let rawLandmarks: Landmark3D[] | null = null;
     let worldLandmarks: Landmark3D[] | null = null;
+    let ignoredPoses: Landmark3D[][] = [];
+    let detectedSubjectCount = 0;
+    let ignoredSubjectCount = 0;
     let lastInferenceMs = 0;
     let lastMaskMs = 0;
     let lastFxRenderMs = 0;
@@ -658,6 +669,7 @@ export default function App() {
       if (mediaChanged || video.currentTime + 0.08 < lastVideoFrameTime) {
         mediaRevision = mediaRevisionRef.current;
         compositor?.reset();
+        subjectSelector.reset();
         lastVideoFrameTime = -1;
         videoFramePending = true;
         if (!mediaChanged) {
@@ -667,6 +679,9 @@ export default function App() {
           fxEngine.reset();
         }
         rawLandmarks = smoothedLandmarks = worldLandmarks = null;
+        ignoredPoses = [];
+        detectedSubjectCount = 0;
+        ignoredSubjectCount = 0;
       }
 
       if (!hasVideo || sw === 0 || sh === 0 || fw === 0 || fh === 0) {
@@ -690,8 +705,38 @@ export default function App() {
         try {
           landmarker.detectForVideo(video, monotonicTs, (result) => {
             lastInferenceMs = performance.now() - t0;
-            rawLandmarks = result.landmarks[0] ?? null;
-            const rawWorld = result.worldLandmarks[0] ?? null;
+
+            // Pick the single active center-stage performer; select() reuses its
+            // return object, so snapshot everything needed before the next call.
+            const sel = subjectSelector.select(
+              result.landmarks,
+              result.worldLandmarks,
+              monotonicTs,
+              centerZoneOnlyRef.current,
+            );
+            const selectedIndex = sel.selectedIndex;
+            const selTorsoX = sel.torsoX;
+            const selTorsoY = sel.torsoY;
+            detectedSubjectCount = sel.totalDetected;
+            ignoredSubjectCount = sel.ignoredIndices.length;
+            ignoredPoses.length = 0;
+            for (const i of sel.ignoredIndices) {
+              const ignored = result.landmarks[i];
+              if (ignored) ignoredPoses.push(ignored);
+            }
+
+            // Subject switch: person A's smoothed pose, mask, echoes, and charge
+            // hum must never bleed onto person B.
+            if (sel.switched) {
+              smoother.reset();
+              tracker.reset();
+              fxEngine.reset();
+              compositor?.reset();
+              soundEngine.endCharge();
+            }
+
+            rawLandmarks = selectedIndex >= 0 ? (result.landmarks[selectedIndex] ?? null) : null;
+            const rawWorld = selectedIndex >= 0 ? (result.worldLandmarks[selectedIndex] ?? null) : null;
             smoothedLandmarks = rawLandmarks && oneEuroRef.current
               ? smoother.smooth(rawLandmarks, monotonicTs)
               : rawLandmarks;
@@ -700,15 +745,10 @@ export default function App() {
               : rawWorld;
             try {
               const maskStart = performance.now();
-              const left = rawLandmarks?.[POSE_IDX.LEFT_SHOULDER];
-              const right = rawLandmarks?.[POSE_IDX.RIGHT_SHOULDER];
-              const leftHip = rawLandmarks?.[POSE_IDX.LEFT_HIP];
-              const rightHip = rawLandmarks?.[POSE_IDX.RIGHT_HIP];
-              const torsoX = left && right && leftHip && rightHip
-                ? (left.x + right.x) * 0.32 + (leftHip.x + rightHip.x) * 0.18 : 0.5;
-              const torsoY = left && right && leftHip && rightHip
-                ? (left.y + right.y) * 0.32 + (leftHip.y + rightHip.y) * 0.18 : 0.5;
-              compositor?.updateMask(result.segmentationMasks?.[0], torsoX, torsoY);
+              const selectedMask = selectedIndex >= 0
+                ? result.segmentationMasks?.[selectedIndex]
+                : undefined;
+              compositor?.updateMask(selectedMask, selTorsoX, selTorsoY);
               lastMaskMs = compositor?.hasMask ? performance.now() - maskStart : 0;
             } catch (error) {
               useCanvasFallback(error);
@@ -717,6 +757,9 @@ export default function App() {
         } catch {
           // A seek can temporarily fail inference. Drop stale tracking before the next frame.
           rawLandmarks = smoothedLandmarks = worldLandmarks = null;
+          ignoredPoses.length = 0;
+          detectedSubjectCount = 0;
+          ignoredSubjectCount = 0;
           compositor?.updateMask(undefined);
         }
       }
@@ -725,7 +768,6 @@ export default function App() {
       const poseEval = tracker.update(
         smoothedLandmarks,
         worldLandmarks,
-        modeRef.current,
         nowMs,
         simulateRef.current,
       );
@@ -741,7 +783,6 @@ export default function App() {
 
       // 4. Remap normalized pose anchors into FX canvas-normalized space (in-place mutation, 0 allocations)
       mappedPose.hasPerson = poseEval.hasPerson;
-      mappedPose.resolvedMode = poseEval.resolvedMode;
       mappedPose.stanceSide = poseEval.stanceSide;
       mappedPose.subScores = poseEval.subScores;
       mappedPose.rawConfidence = poseEval.rawConfidence;
@@ -842,7 +883,16 @@ export default function App() {
       if (showHudRef.current) {
         fxRect.offsetX += shake.x;
         fxRect.offsetY += shake.y;
-        drawDebugSkeleton(fxCtx, smoothedLandmarks, rawLandmarks, poseEval, fxRect, isMirrored);
+        drawDebugSkeleton(
+          fxCtx,
+          smoothedLandmarks,
+          rawLandmarks,
+          poseEval,
+          fxRect,
+          isMirrored,
+          ignoredPoses,
+          centerZoneOnlyRef.current,
+        );
       }
       lastFxRenderMs = performance.now() - fxT0;
 
@@ -855,6 +905,8 @@ export default function App() {
           maskMs: lastMaskMs,
           fxRenderMs: lastFxRenderMs,
           pose: poseEval,
+          subjectCount: detectedSubjectCount,
+          ignoredCount: ignoredSubjectCount,
           engineInfo: engineInfoRef.current,
           renderer: compositor
             ? !fxOptionsRef.current.depthMatte
@@ -876,7 +928,7 @@ export default function App() {
       compositeCanvas.removeEventListener('webglcontextrestored', initCompositor);
       useCanvasFallback();
     };
-  }, [fxEngine, smoother, soundEngine, tracker]);
+  }, [fxEngine, smoother, soundEngine, subjectSelector, tracker]);
 
   // Initialize MediaPipe PoseLandmarker on mount
   useEffect(() => {
@@ -973,6 +1025,8 @@ export default function App() {
                 onChangeEntryThreshold={setEntryThreshold}
                 triggerMode={triggerMode}
                 onChangeTriggerMode={setTriggerMode}
+                centerZoneOnly={centerZoneOnly}
+                onToggleCenterZoneOnly={() => setCenterZoneOnly((v) => !v)}
                 fxOptions={fxOptions}
                 onChangeFxOptions={setFxOptions}
                 volume={volume}
@@ -1001,7 +1055,6 @@ export default function App() {
             {showGuide && !showHud && (
               <PoseGuideCard
                 poseState={telemetry.pose.state}
-                resolvedMode={telemetry.pose.resolvedMode}
                 chargeProgress={telemetry.pose.chargeProgress}
                 onDismiss={() => setShowGuide(false)}
               />
@@ -1010,8 +1063,14 @@ export default function App() {
         </header>
       )}
 
-      {/* Razor-thin right-edge vertical Stance Lock hairline meter */}
-      {sourceKind !== 'none' && <StanceLockMeter confidence={telemetry.pose.rawConfidence} threshold={entryThreshold} />}
+      {/* Right-edge vertical Stance Lock meter */}
+      {sourceKind !== 'none' && (
+        <StanceLockMeter
+          confidence={telemetry.pose.rawConfidence}
+          threshold={entryThreshold}
+          charging={telemetry.pose.state === 'CHARGING'}
+        />
+      )}
 
       {/* Editorial Landing Stage before session starts */}
       {sourceKind === 'none' && (
@@ -1088,26 +1147,6 @@ export default function App() {
             isAttenuated ? 'opacity-20 hover:opacity-100' : 'opacity-100'
           }`}
         >
-          {/* AUTO | FULL | DESK Segmented Mode Toggle */}
-          <div className="flex items-center rounded-full bg-white/5 p-0.5 border border-white/5">
-            {(['auto', 'full-body', 'upper-body'] as DetectionMode[]).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                className={`rounded-full px-2 py-0.5 text-[10px] font-mono tracking-wider transition cursor-pointer whitespace-nowrap ${
-                  mode === m
-                    ? 'bg-white/15 text-[#f8fafc] font-medium'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {m === 'auto' ? 'AUTO' : m === 'full-body' ? 'FULL' : 'DESK'}
-              </button>
-            ))}
-          </div>
-
-          <div className="h-4 w-px bg-white/10 mx-0.5" />
-
           {/* Preview (S) / Manual Trigger */}
           <button
             type="button"

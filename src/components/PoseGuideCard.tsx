@@ -3,14 +3,12 @@ import type { PoseState } from '../cv/akazaPoseClassifier';
 
 interface PoseGuideCardProps {
   poseState: PoseState;
-  resolvedMode: 'full-body' | 'upper-body';
   chargeProgress: number;
   onDismiss: () => void;
 }
 
 export function PoseGuideCard({
   poseState,
-  resolvedMode,
   chargeProgress,
   onDismiss,
 }: PoseGuideCardProps) {
@@ -124,37 +122,18 @@ export function PoseGuideCard({
 
         {/* Clean 01 / 02 / 03 numbered monospace instructions */}
         <ol className="space-y-1.5 font-mono text-[10px] text-slate-300 leading-normal">
-          {resolvedMode === 'full-body' ? (
-            <>
-              <li className="flex items-start gap-2">
-                <span className="text-slate-500 shrink-0 select-none">01</span>
-                <span>Drop into low, wide horse stance</span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-slate-500 shrink-0 select-none">02</span>
-                <span>Lead fist raised at forward guard</span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-slate-500 shrink-0 select-none">03</span>
-                <span>Rear fist chambered low by waist</span>
-              </li>
-            </>
-          ) : (
-            <>
-              <li className="flex items-start gap-2">
-                <span className="text-slate-500 shrink-0 select-none">01</span>
-                <span>Desk framing (upper body active)</span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-slate-500 shrink-0 select-none">02</span>
-                <span>Lead fist raised at forward guard</span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="text-slate-500 shrink-0 select-none">03</span>
-                <span>Rear fist chambered low by waist</span>
-              </li>
-            </>
-          )}
+          <li className="flex items-start gap-2">
+            <span className="text-slate-500 shrink-0 select-none">01</span>
+            <span>Drop into low, wide horse stance</span>
+          </li>
+          <li className="flex items-start gap-2">
+            <span className="text-slate-500 shrink-0 select-none">02</span>
+            <span>Lead fist raised at forward guard</span>
+          </li>
+          <li className="flex items-start gap-2">
+            <span className="text-slate-500 shrink-0 select-none">03</span>
+            <span>Rear fist chambered low by waist</span>
+          </li>
         </ol>
 
         {/* Subtle charge indicator bar */}
